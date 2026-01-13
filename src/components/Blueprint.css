@@ -1,0 +1,66 @@
+.blueprint {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: #1a1a2e;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.blueprint-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  background: #16213e;
+  border-bottom: 1px solid #0f3460;
+}
+
+.blueprint-header h2 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: #e94560;
+}
+
+.blueprint-stats {
+  display: flex;
+  gap: 16px;
+  font-size: 0.85rem;
+  color: #9ca3af;
+}
+
+.blueprint-stats .red-flag {
+  color: #ef4444;
+}
+
+.blueprint-stats .green-flag {
+  color: #22c55e;
+}
+
+.blueprint-canvas {
+  flex: 1;
+  min-height: 300px;
+}
+
+.node-details {
+  padding: 12px 16px;
+  background: #16213e;
+  border-top: 1px solid #0f3460;
+}
+
+.node-details h3 {
+  margin: 0 0 8px 0;
+  color: #e94560;
+  font-size: 1rem;
+}
+
+.node-details p {
+  margin: 4px 0;
+  font-size: 0.85rem;
+  color: #d1d5db;
+}
+
+.node-details strong {
+  color: #9ca3af;
+}
+

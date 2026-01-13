@@ -1,0 +1,174 @@
+.dashboard {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  background: #0f0f1a;
+  color: #e5e5e5;
+}
+
+.dashboard-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #16213e, #0f3460);
+  border-bottom: 1px solid #e94560;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.logo-icon {
+  font-size: 2rem;
+}
+
+.logo h1 {
+  margin: 0;
+  font-size: 1.5rem;
+  background: linear-gradient(135deg, #e94560, #f472b6);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 0.85rem;
+}
+
+.runtime-status {
+  padding: 4px 12px;
+  border-radius: 4px;
+}
+
+.runtime-status.ready {
+  background: rgba(74, 222, 128, 0.2);
+  color: #4ade80;
+}
+
+.runtime-status.error {
+  background: rgba(239, 68, 68, 0.2);
+  color: #ef4444;
+}
+
+.workspace {
+  color: #9ca3af;
+  font-family: monospace;
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.error-banner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 24px;
+  background: rgba(239, 68, 68, 0.2);
+  border-bottom: 1px solid #ef4444;
+  color: #ef4444;
+}
+
+.error-banner button {
+  padding: 4px 12px;
+  background: #ef4444;
+  border: none;
+  border-radius: 4px;
+  color: white;
+  cursor: pointer;
+}
+
+.tab-nav {
+  display: flex;
+  gap: 4px;
+  padding: 8px 24px;
+  background: #16213e;
+}
+
+.tab-nav button {
+  padding: 10px 20px;
+  background: transparent;
+  border: none;
+  border-radius: 6px 6px 0 0;
+  color: #9ca3af;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tab-nav button:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #e5e5e5;
+}
+
+.tab-nav button.active {
+  background: #1a1a2e;
+  color: #e94560;
+  font-weight: 600;
+}
+
+.dashboard-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 24px;
+  overflow: hidden;
+}
+
+.panel-container {
+  flex: 1;
+  overflow: hidden;
+}
+
+.script-input {
+  display: flex;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid #0f3460;
+}
+
+.script-input textarea {
+  flex: 1;
+  padding: 12px;
+  background: #1a1a2e;
+  border: 1px solid #0f3460;
+  border-radius: 6px;
+  color: #e5e5e5;
+  font-family: monospace;
+  font-size: 0.9rem;
+  resize: none;
+}
+
+.script-input textarea:focus {
+  outline: none;
+  border-color: #e94560;
+}
+
+.script-input button {
+  padding: 12px 24px;
+  background: linear-gradient(135deg, #e94560, #0f3460);
+  border: none;
+  border-radius: 6px;
+  color: white;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.script-input button:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(233, 69, 96, 0.3);
+}
+
+.script-input button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
