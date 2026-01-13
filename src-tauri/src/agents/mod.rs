@@ -5,12 +5,14 @@ pub mod interrogator;
 pub mod architect;
 pub mod orchestrator;
 pub mod context_engineer;
+pub mod atom_executor;
 
 // Re-exports
 pub use interrogator::Interrogator;
 pub use architect::Architect;
 pub use orchestrator::Orchestrator;
 pub use context_engineer::ContextEngineer;
+pub use atom_executor::{AtomExecutor, AtomInput, AtomOutput, CodeChange, ReviewResult, ValidationResult};
 
 use serde::{Deserialize, Serialize};
 

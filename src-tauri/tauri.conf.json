@@ -12,9 +12,12 @@
   "app": {
     "windows": [
       {
-        "title": "cerebras-maker",
-        "width": 800,
-        "height": 600
+        "title": "Cerebras MAKER",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 800,
+        "minHeight": 600,
+        "center": true
       }
     ],
     "security": {
@@ -31,5 +34,114 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ]
+  },
+  "plugins": {
+    "cli": {
+      "description": "Cerebras MAKER - Autonomous Coding System",
+      "args": [
+        {
+          "name": "headless",
+          "short": "H",
+          "description": "Run in headless mode (no GUI)",
+          "takesValue": false
+        },
+        {
+          "name": "prd",
+          "short": "p",
+          "description": "Path to PRD file to process",
+          "takesValue": true
+        },
+        {
+          "name": "workspace",
+          "short": "w",
+          "description": "Workspace directory",
+          "takesValue": true
+        },
+        {
+          "name": "script",
+          "short": "s",
+          "description": "Rhai script to execute directly",
+          "takesValue": true
+        }
+      ],
+      "subcommands": {
+        "run": {
+          "description": "Run MAKER on a PRD",
+          "args": [
+            {
+              "name": "file",
+              "description": "PRD file path",
+              "takesValue": true,
+              "required": true
+            }
+          ]
+        },
+        "exec": {
+          "description": "Execute a Rhai script directly",
+          "args": [
+            {
+              "name": "script",
+              "description": "Rhai script file path",
+              "takesValue": true,
+              "required": true
+            }
+          ]
+        }
+      }
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    },
+    "shell": {
+      "open": true,
+      "scope": [
+        {
+          "name": "git",
+          "cmd": "git",
+          "args": true
+        },
+        {
+          "name": "cargo",
+          "cmd": "cargo",
+          "args": [
+            "check",
+            "build",
+            "test",
+            "clippy"
+          ]
+        },
+        {
+          "name": "npm",
+          "cmd": "npm",
+          "args": true
+        },
+        {
+          "name": "python",
+          "cmd": "python",
+          "args": [
+            "-m",
+            "pytest"
+          ]
+        }
+      ]
+    },
+    "notification": {
+      "all": true
+    },
+    "fs": {
+      "scope": [
+        "$APP/**",
+        "$DOCUMENT/**",
+        "$HOME/**",
+        "$RESOURCE/**"
+      ]
+    },
+    "global-shortcut": {
+      "shortcuts": []
+    },
+    "window-state": {
+      "all": true
+    }
   }
 }

@@ -28,7 +28,7 @@ pub mod templates;
 pub use maker_core::{AtomType, AtomResult, CodeModeRuntime, ShadowGit, ConsensusConfig, ConsensusResult};
 
 // Re-export agent types
-pub use agents::{Agent, Interrogator, Architect, Orchestrator, AgentContext, AgentOutput};
+pub use agents::{Agent, Interrogator, Architect, Orchestrator, AgentContext, AgentOutput, AtomExecutor, AtomInput, AtomOutput, CodeChange, ReviewResult, ValidationResult};
 
 // Re-export LLM types
 pub use llm::{LlmProvider, LlmConfig, Message, Role};
@@ -838,11 +838,221 @@ fn get_task_context_markdown(
     Ok(context_package.markdown)
 }
 
+// ============================================================================
+// L4 Atom Execution Commands
+// PRD Section 4.2: "The Atom" - Ephemeral, stateless agents with exactly one tool
+// ============================================================================
+
+/// Execute a single atom with context
+/// This is the core L4 execution - takes a task and optional context, returns atom result
+#[tauri::command]
+async fn execute_atom(
+    atom_type: String,
+    task: String,
+    context_package: Option<serde_json::Value>,
+    require_json: bool,
+    temperature: f32,
+) -> Result<serde_json::Value, String> {
+    use agents::atom_executor::{AtomExecutor, AtomInput};
+    use agents::context_engineer::ContextPackage;
+    use maker_core::SpawnFlags;
+
+    // Parse atom type
+    let atom_type = AtomType::from_str(&atom_type)
+        .ok_or_else(|| format!("Unknown atom type: {}", atom_type))?;
+
+    // Build spawn flags
+    let flags = SpawnFlags {
+        require_json,
+        temperature,
+        max_tokens: Some(atom_type.max_tokens()),
+        red_flag_check: true,
+    };
+
+    // Build atom input
+    let mut input = AtomInput::new(atom_type, &task).with_flags(flags);
+
+    // Deserialize context package if provided
+    if let Some(ctx_json) = context_package {
+        let context: ContextPackage = serde_json::from_value(ctx_json)
+            .map_err(|e| format!("Invalid context package: {}", e))?;
+        input = input.with_context(context);
+    }
+
+    // Get LLM config
+    let llm_config = get_llm_config_from_settings()?;
+
+    // Create executor and run
+    let executor = AtomExecutor::new(llm_config);
+    let result = executor.execute(input).await?;
+
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Execute an atom with full context extraction (L3 + L4 pipeline)
+/// Combines context engineering and atom execution in one call
+#[tauri::command]
+async fn execute_atom_with_context(
+    atom_type: String,
+    task_id: String,
+    task_description: String,
+    seed_symbols: Vec<String>,
+    workspace_path: String,
+    require_json: bool,
+) -> Result<serde_json::Value, String> {
+    use agents::atom_executor::{AtomExecutor, AtomInput};
+    use agents::context_engineer::ContextEngineer;
+    use agents::MicroTask;
+    use maker_core::SpawnFlags;
+    use std::path::Path;
+
+    // Parse atom type
+    let parsed_atom_type = AtomType::from_str(&atom_type)
+        .ok_or_else(|| format!("Unknown atom type: {}", atom_type))?;
+
+    // Build the micro-task for L3
+    let task = MicroTask {
+        id: task_id.clone(),
+        description: task_description.clone(),
+        atom_type: atom_type.clone(),
+        estimated_complexity: 3,
+        seed_symbols,
+    };
+
+    // L3: Extract context
+    let engineer = ContextEngineer::new();
+    let context_package = engineer.extract_context(&task, Path::new(&workspace_path))?;
+
+    // Build spawn flags
+    let flags = SpawnFlags {
+        require_json,
+        temperature: 0.1,
+        max_tokens: Some(parsed_atom_type.max_tokens()),
+        red_flag_check: true,
+    };
+
+    // L4: Execute atom with context
+    let input = AtomInput::new(parsed_atom_type, &task_description)
+        .with_context(context_package)
+        .with_flags(flags);
+
+    let llm_config = get_llm_config_from_settings()?;
+    let executor = AtomExecutor::new(llm_config);
+    let result = executor.execute(input).await?;
+
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Parse code output from a Coder atom into structured changes
+#[tauri::command]
+fn parse_coder_output(raw_output: String) -> Result<serde_json::Value, String> {
+    use agents::atom_executor::AtomExecutor;
+
+    let executor = AtomExecutor::new(LlmConfig::default());
+    let changes = executor.parse_code_output(&raw_output);
+
+    serde_json::to_value(&changes).map_err(|e| e.to_string())
+}
+
+/// Parse review output from a Reviewer atom
+#[tauri::command]
+fn parse_reviewer_output(raw_output: String) -> Result<serde_json::Value, String> {
+    use agents::atom_executor::AtomExecutor;
+
+    let executor = AtomExecutor::new(LlmConfig::default());
+    let result = executor.parse_review_output(&raw_output)?;
+
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Get available atom types
+#[tauri::command]
+fn get_atom_types() -> serde_json::Value {
+    serde_json::json!([
+        {"id": "Search", "name": "Search", "description": "Find relevant code", "max_tokens": 500},
+        {"id": "Coder", "name": "Coder", "description": "Write code", "max_tokens": 2000},
+        {"id": "Reviewer", "name": "Reviewer", "description": "Review code", "max_tokens": 750},
+        {"id": "Planner", "name": "Planner", "description": "Break down tasks", "max_tokens": 1000},
+        {"id": "Validator", "name": "Validator", "description": "Validate requirements", "max_tokens": 500},
+        {"id": "Tester", "name": "Tester", "description": "Write tests", "max_tokens": 2000},
+        {"id": "Architect", "name": "Architect", "description": "Design interfaces", "max_tokens": 1500},
+        {"id": "GritsAnalyzer", "name": "GritsAnalyzer", "description": "Analyze topology", "max_tokens": 1000}
+    ])
+}
+
+/// Helper to get LLM config from saved settings
+fn get_llm_config_from_settings() -> Result<LlmConfig, String> {
+    let path = get_settings_path();
+    if path.exists() {
+        let json = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read settings: {}", e))?;
+        let settings: AppSettings = serde_json::from_str(&json)
+            .map_err(|e| format!("Failed to parse settings: {}", e))?;
+
+        // Use the first configured provider
+        if !settings.api_keys.openai.is_empty() {
+            return Ok(LlmConfig {
+                api_key: Some(settings.api_keys.openai.clone()),
+                model: "gpt-4o".to_string(),
+                ..Default::default()
+            });
+        }
+        if !settings.api_keys.anthropic.is_empty() {
+            return Ok(LlmConfig {
+                api_key: Some(settings.api_keys.anthropic.clone()),
+                ..LlmConfig::anthropic()
+            });
+        }
+        if !settings.api_keys.cerebras.is_empty() {
+            return Ok(LlmConfig {
+                api_key: Some(settings.api_keys.cerebras.clone()),
+                ..LlmConfig::cerebras()
+            });
+        }
+    }
+
+    // Fall back to environment variables
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        return Ok(LlmConfig::default());
+    }
+    if std::env::var("ANTHROPIC_API_KEY").is_ok() {
+        return Ok(LlmConfig::anthropic());
+    }
+    if std::env::var("CEREBRAS_API_KEY").is_ok() {
+        return Ok(LlmConfig::cerebras());
+    }
+
+    Err("No LLM provider configured. Please set an API key in Settings.".to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Core plugins
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        // File system and shell
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        // Storage and persistence
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_window_state::Builder::new().build())
+        // Notifications and clipboard
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        // Global shortcuts
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Logging
+        .plugin(tauri_plugin_log::Builder::new().build())
+        // Single instance (prevents duplicate processes)
+        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {
+            // Focus the existing window when a second instance is launched
+        }))
+        // CLI argument parsing
+        .plugin(tauri_plugin_cli::init())
+        // Auto-updater
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             greet,
             // Grits commands
@@ -879,7 +1089,13 @@ pub fn run() {
             // L3 Context Engineer commands
             extract_task_context,
             extract_task_context_cached,
-            get_task_context_markdown
+            get_task_context_markdown,
+            // L4 Atom Execution commands
+            execute_atom,
+            execute_atom_with_context,
+            parse_coder_output,
+            parse_reviewer_output,
+            get_atom_types
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

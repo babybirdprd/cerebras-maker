@@ -157,6 +157,9 @@ impl CodeModeRuntime {
         module.set_var("Reviewer", AtomType::Reviewer);
         module.set_var("Planner", AtomType::Planner);
         module.set_var("Validator", AtomType::Validator);
+        module.set_var("Tester", AtomType::Tester);
+        module.set_var("Architect", AtomType::Architect);
+        module.set_var("GritsAnalyzer", AtomType::GritsAnalyzer);
         module
     }
 

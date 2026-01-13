@@ -18,6 +18,12 @@ pub enum AtomType {
     Planner,
     /// Validator atom - validates code against requirements
     Validator,
+    /// Tester atom - generates and runs tests
+    Tester,
+    /// Architect atom - designs structures and interfaces
+    Architect,
+    /// GritsAnalyzer atom - performs topology analysis
+    GritsAnalyzer,
 }
 
 impl AtomType {
@@ -44,6 +50,18 @@ impl AtomType {
                 "You are a Validator Atom. Your only job is to check if code meets requirements. \
                  Return a JSON object with 'valid' (boolean) and 'violations' (array of strings)."
             }
+            AtomType::Tester => {
+                "You are a Tester Atom. Your only job is to write test code for the given implementation. \
+                 Return test code that follows the existing test patterns. Include assertions."
+            }
+            AtomType::Architect => {
+                "You are an Architect Atom. Your only job is to design structures and interfaces. \
+                 Return a JSON object with 'interfaces', 'structs', and 'relationships' arrays."
+            }
+            AtomType::GritsAnalyzer => {
+                "You are a GritsAnalyzer Atom. Your only job is to analyze code topology. \
+                 Return a JSON object with 'cycles', 'layers', 'violations', and 'red_flags' arrays."
+            }
         }
     }
 
@@ -55,6 +73,38 @@ impl AtomType {
             AtomType::Reviewer => 750,
             AtomType::Planner => 1000,
             AtomType::Validator => 500,
+            AtomType::Tester => 2000,
+            AtomType::Architect => 1500,
+            AtomType::GritsAnalyzer => 1000,
+        }
+    }
+
+    /// Convert from string representation
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "search" => Some(AtomType::Search),
+            "coder" => Some(AtomType::Coder),
+            "reviewer" => Some(AtomType::Reviewer),
+            "planner" => Some(AtomType::Planner),
+            "validator" => Some(AtomType::Validator),
+            "tester" => Some(AtomType::Tester),
+            "architect" => Some(AtomType::Architect),
+            "gritsanalyzer" | "grits" => Some(AtomType::GritsAnalyzer),
+            _ => None,
+        }
+    }
+
+    /// Convert to string representation
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AtomType::Search => "Search",
+            AtomType::Coder => "Coder",
+            AtomType::Reviewer => "Reviewer",
+            AtomType::Planner => "Planner",
+            AtomType::Validator => "Validator",
+            AtomType::Tester => "Tester",
+            AtomType::Architect => "Architect",
+            AtomType::GritsAnalyzer => "GritsAnalyzer",
         }
     }
 }

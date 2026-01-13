@@ -417,3 +417,97 @@ export async function getTaskContextMarkdown(
     workspacePath,
   });
 }
+
+// ============================================================================
+// L4 Atom Execution Commands
+// ============================================================================
+
+export interface AtomResult {
+  atom_type: string;
+  output: string;
+  valid: boolean;
+  errors: string[];
+  execution_time_ms: number;
+  tokens_used: number;
+  metadata: Record<string, string>;
+}
+
+export interface CodeChange {
+  file_path: string;
+  content: string;
+  language?: string;
+}
+
+export interface ReviewResult {
+  approved: boolean;
+  issues: string[];
+  suggestions: string[];
+}
+
+export interface AtomTypeInfo {
+  id: string;
+  name: string;
+  description: string;
+  max_tokens: number;
+}
+
+/**
+ * Execute a single atom with optional context
+ */
+export async function executeAtom(
+  atomType: string,
+  task: string,
+  contextPackage?: ContextPackage,
+  requireJson = false,
+  temperature = 0.1
+): Promise<AtomResult> {
+  return await invoke<AtomResult>('execute_atom', {
+    atomType,
+    task,
+    contextPackage,
+    requireJson,
+    temperature,
+  });
+}
+
+/**
+ * Execute an atom with full context extraction (L3 + L4 pipeline)
+ */
+export async function executeAtomWithContext(
+  atomType: string,
+  taskId: string,
+  taskDescription: string,
+  seedSymbols: string[],
+  workspacePath: string,
+  requireJson = false
+): Promise<AtomResult> {
+  return await invoke<AtomResult>('execute_atom_with_context', {
+    atomType,
+    taskId,
+    taskDescription,
+    seedSymbols,
+    workspacePath,
+    requireJson,
+  });
+}
+
+/**
+ * Parse code output from a Coder atom into structured changes
+ */
+export async function parseCoderOutput(rawOutput: string): Promise<CodeChange[]> {
+  return await invoke<CodeChange[]>('parse_coder_output', { rawOutput });
+}
+
+/**
+ * Parse review output from a Reviewer atom
+ */
+export async function parseReviewerOutput(rawOutput: string): Promise<ReviewResult> {
+  return await invoke<ReviewResult>('parse_reviewer_output', { rawOutput });
+}
+
+/**
+ * Get available atom types
+ */
+export async function getAtomTypes(): Promise<AtomTypeInfo[]> {
+  return await invoke<AtomTypeInfo[]>('get_atom_types');
+}
