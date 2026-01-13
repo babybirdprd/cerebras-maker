@@ -2,24 +2,27 @@
 // PRD Section 6.2: Visual scrubber for gitoxide history
 
 import { useEffect, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import { useMakerStore, HistoryEntry } from '../store/makerStore';
+import { useMakerStore } from '../store/makerStore';
+import { getGitHistory, checkoutCommit, getSnapshots, rollbackToSnapshot, Snapshot } from '../hooks/useTauri';
 import './TimeMachine.css';
 
 export function TimeMachine() {
   const { gitHistory, currentCommit, setGitHistory, setCurrentCommit } = useMakerStore();
   const [loading, setLoading] = useState(false);
   const [sliderValue, setSliderValue] = useState(0);
-  
-  // Load git history on mount
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [timeTravelStatus, setTimeTravelStatus] = useState<string | null>(null);
+
+  // Load git history and snapshots on mount
   useEffect(() => {
     loadHistory();
+    loadSnapshots();
   }, []);
-  
+
   async function loadHistory() {
     setLoading(true);
     try {
-      const history = await invoke<HistoryEntry[]>('get_git_history', { limit: 50 });
+      const history = await getGitHistory(50);
       setGitHistory(history);
       if (history.length > 0) {
         setCurrentCommit(history[0].hash);
@@ -30,7 +33,17 @@ export function TimeMachine() {
     }
     setLoading(false);
   }
-  
+
+  async function loadSnapshots() {
+    try {
+      const snaps = await getSnapshots();
+      setSnapshots(snaps);
+    } catch (e) {
+      // Snapshots not available yet
+      console.log('Snapshots not loaded:', e);
+    }
+  }
+
   function handleSliderChange(e: React.ChangeEvent<HTMLInputElement>) {
     const value = parseInt(e.target.value, 10);
     setSliderValue(value);
@@ -38,17 +51,38 @@ export function TimeMachine() {
       setCurrentCommit(gitHistory[value].hash);
     }
   }
-  
+
   async function handleTimeTravel() {
     if (!currentCommit) return;
-    
+
+    setLoading(true);
+    setTimeTravelStatus(null);
     try {
-      // This would trigger a git checkout to the selected commit
-      // For now, just update the UI state
-      console.log('Time travel to:', currentCommit);
+      const result = await checkoutCommit(currentCommit);
+      setTimeTravelStatus(`✅ ${result}`);
+      // Refresh history after checkout
+      await loadHistory();
     } catch (e) {
+      setTimeTravelStatus(`❌ Failed: ${e}`);
       console.error('Failed to time travel:', e);
     }
+    setLoading(false);
+  }
+
+  async function handleRollbackToSnapshot(snapshotId: string) {
+    setLoading(true);
+    setTimeTravelStatus(null);
+    try {
+      const result = await rollbackToSnapshot(snapshotId);
+      setTimeTravelStatus(`✅ ${result}`);
+      // Refresh history and snapshots after rollback
+      await loadHistory();
+      await loadSnapshots();
+    } catch (e) {
+      setTimeTravelStatus(`❌ Failed: ${e}`);
+      console.error('Failed to rollback:', e);
+    }
+    setLoading(false);
   }
   
   const currentEntry = gitHistory[sliderValue];
@@ -91,22 +125,50 @@ export function TimeMachine() {
               )}
             </div>
             
-            <button 
-              onClick={handleTimeTravel} 
+            <button
+              onClick={handleTimeTravel}
               className="time-travel-btn"
-              disabled={!currentCommit}
+              disabled={!currentCommit || loading}
             >
-              🚀 Time Travel to This Commit
+              {loading ? '⏳ Working...' : '🚀 Time Travel to This Commit'}
             </button>
+
+            {timeTravelStatus && (
+              <div className={`status-message ${timeTravelStatus.startsWith('✅') ? 'success' : 'error'}`}>
+                {timeTravelStatus}
+              </div>
+            )}
           </>
         )}
       </div>
-      
+
+      {/* Snapshots Section */}
+      {snapshots.length > 0 && (
+        <div className="snapshots-section">
+          <h3>📸 Snapshots</h3>
+          <div className="snapshots">
+            {snapshots.map((snapshot) => (
+              <div
+                key={snapshot.id}
+                className="snapshot-item"
+                onClick={() => handleRollbackToSnapshot(snapshot.id)}
+              >
+                <span className="snapshot-id">{snapshot.id.slice(0, 8)}</span>
+                <span className="snapshot-message">{snapshot.message}</span>
+                <span className="snapshot-time">
+                  {new Date(snapshot.timestamp_ms).toLocaleTimeString()}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="commit-list">
         <h3>Recent Commits</h3>
         <div className="commits">
           {gitHistory.slice(0, 10).map((entry, idx) => (
-            <div 
+            <div
               key={entry.hash}
               className={`commit-item ${idx === sliderValue ? 'selected' : ''}`}
               onClick={() => {

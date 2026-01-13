@@ -39,6 +39,9 @@ pub use generators::{ScriptGenerator, GeneratorRegistry, GenerationResult, RhaiS
 // Global runtime instance (lazy initialized)
 static RUNTIME: Mutex<Option<CodeModeRuntime>> = Mutex::new(None);
 
+// Global ShadowGit instance for transactional file operations
+static SHADOW_GIT: Mutex<Option<ShadowGit>> = Mutex::new(None);
+
 /// Module for grits-core integration functionality
 pub mod grits {
     use super::*;
@@ -173,6 +176,14 @@ fn init_runtime(workspace_path: String) -> Result<String, String> {
         *global = Some(runtime);
     }
 
+    // Also initialize the ShadowGit for the workspace
+    let mut shadow_git = ShadowGit::new(&workspace_path);
+    shadow_git.init().map_err(|e| format!("Failed to initialize shadow git: {}", e))?;
+
+    if let Ok(mut sg) = SHADOW_GIT.lock() {
+        *sg = Some(shadow_git);
+    }
+
     Ok("Runtime initialized".to_string())
 }
 
@@ -204,17 +215,117 @@ fn get_execution_log() -> Result<serde_json::Value, String> {
     serde_json::to_value(&log).map_err(|e| e.to_string())
 }
 
+// ============================================================================
+// Shadow Git Commands - Transactional File System
+// ============================================================================
+
 /// Create a snapshot (Shadow Git)
+/// PRD 5.1: "Before any Rhai script touches disk, gitoxide creates a blob"
 #[tauri::command]
 fn create_snapshot(message: String) -> Result<serde_json::Value, String> {
-    let _runtime = RUNTIME.lock()
-        .map_err(|_| "Failed to acquire runtime lock")?;
+    let mut sg = SHADOW_GIT.lock()
+        .map_err(|_| "Failed to acquire shadow git lock")?;
 
-    // For now return a placeholder - full implementation needs interior mutability refactor
+    let shadow_git = sg.as_mut()
+        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+
+    let snapshot = shadow_git.snapshot(&message)
+        .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+
     Ok(serde_json::json!({
-        "message": message,
-        "status": "snapshot_created"
+        "id": snapshot.id,
+        "message": snapshot.message,
+        "timestamp_ms": snapshot.timestamp_ms,
+        "commit_hash": snapshot.commit_hash
     }))
+}
+
+/// Rollback to the previous snapshot
+/// PRD 5.1: "gitoxide reverts the index to the snapshot instantly"
+#[tauri::command]
+fn rollback_snapshot() -> Result<String, String> {
+    let mut sg = SHADOW_GIT.lock()
+        .map_err(|_| "Failed to acquire shadow git lock")?;
+
+    let shadow_git = sg.as_mut()
+        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+
+    shadow_git.rollback()
+        .map_err(|e| format!("Failed to rollback: {}", e))?;
+
+    Ok("Rolled back to previous snapshot".to_string())
+}
+
+/// Rollback to a specific snapshot by ID
+#[tauri::command]
+fn rollback_to_snapshot(snapshot_id: String) -> Result<String, String> {
+    let mut sg = SHADOW_GIT.lock()
+        .map_err(|_| "Failed to acquire shadow git lock")?;
+
+    let shadow_git = sg.as_mut()
+        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+
+    shadow_git.rollback_to(&snapshot_id)
+        .map_err(|e| format!("Failed to rollback to snapshot: {}", e))?;
+
+    Ok(format!("Rolled back to snapshot: {}", snapshot_id))
+}
+
+/// Squash all snapshots into a single commit
+/// PRD 5.1: "Only when PLAN.md is marked Complete does Shadow Repo squash"
+#[tauri::command]
+fn squash_snapshots(final_message: String) -> Result<serde_json::Value, String> {
+    let mut sg = SHADOW_GIT.lock()
+        .map_err(|_| "Failed to acquire shadow git lock")?;
+
+    let shadow_git = sg.as_mut()
+        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+
+    let commit_hash = shadow_git.squash(&final_message)
+        .map_err(|e| format!("Failed to squash: {}", e))?;
+
+    Ok(serde_json::json!({
+        "message": final_message,
+        "commit_hash": commit_hash
+    }))
+}
+
+/// Get all current snapshots
+#[tauri::command]
+fn get_snapshots() -> Result<serde_json::Value, String> {
+    let sg = SHADOW_GIT.lock()
+        .map_err(|_| "Failed to acquire shadow git lock")?;
+
+    let shadow_git = sg.as_ref()
+        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+
+    let snapshots: Vec<serde_json::Value> = shadow_git.get_snapshots()
+        .iter()
+        .map(|s| serde_json::json!({
+            "id": s.id,
+            "message": s.message,
+            "timestamp_ms": s.timestamp_ms,
+            "commit_hash": s.commit_hash
+        }))
+        .collect();
+
+    Ok(serde_json::json!(snapshots))
+}
+
+/// Checkout to a specific git commit (for time travel)
+#[tauri::command]
+fn checkout_commit(commit_hash: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(["checkout", &commit_hash])
+        .output()
+        .map_err(|e| format!("Failed to checkout: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Checkout failed: {}", stderr));
+    }
+
+    Ok(format!("Checked out to commit: {}", commit_hash))
 }
 
 /// Get git history (for Time Machine)
@@ -608,6 +719,125 @@ fn parse_plan(plan_content: String) -> Result<serde_json::Value, String> {
     }))
 }
 
+// ============================================================================
+// L3 Context Engineer Commands
+// ============================================================================
+
+/// Extract context for a micro-task using the L3 Context Engineer
+/// PRD 3.1: "Semantic Tree-Shaking" - Extract only topologically-relevant code
+#[tauri::command]
+fn extract_task_context(
+    task_id: String,
+    task_description: String,
+    atom_type: String,
+    seed_symbols: Vec<String>,
+    workspace_path: String,
+) -> Result<serde_json::Value, String> {
+    use agents::context_engineer::{ContextConfig, ContextEngineer};
+    use agents::MicroTask;
+    use std::path::Path;
+
+    // Create the micro-task
+    let task = MicroTask {
+        id: task_id,
+        description: task_description,
+        atom_type,
+        estimated_complexity: 3,
+        seed_symbols,
+    };
+
+    // Create the context engineer with default config
+    let engineer = ContextEngineer::new();
+
+    // Extract context
+    let context_package = engineer.extract_context(&task, Path::new(&workspace_path))?;
+
+    // Return as JSON
+    serde_json::to_value(&context_package).map_err(|e| e.to_string())
+}
+
+/// Extract context using a cached symbol graph (more efficient for batch operations)
+#[tauri::command]
+fn extract_task_context_cached(
+    task_id: String,
+    task_description: String,
+    atom_type: String,
+    seed_symbols: Vec<String>,
+    workspace_path: String,
+) -> Result<serde_json::Value, String> {
+    use agents::context_engineer::ContextEngineer;
+    use agents::MicroTask;
+    use std::path::Path;
+
+    // Get cached graph or return error
+    let graph = grits::get_cached_graph()
+        .ok_or("No cached graph. Call load_symbol_graph first.")?;
+
+    // Create the micro-task
+    let task = MicroTask {
+        id: task_id,
+        description: task_description,
+        atom_type,
+        estimated_complexity: 3,
+        seed_symbols,
+    };
+
+    // Create the context engineer
+    let engineer = ContextEngineer::new();
+
+    // Extract context using cached graph
+    let context_package = engineer.extract_context_with_graph(
+        &task,
+        &graph,
+        Path::new(&workspace_path),
+    )?;
+
+    // Return as JSON
+    serde_json::to_value(&context_package).map_err(|e| e.to_string())
+}
+
+/// Get the rendered markdown context for a task (for LLM consumption)
+#[tauri::command]
+fn get_task_context_markdown(
+    task_id: String,
+    task_description: String,
+    atom_type: String,
+    seed_symbols: Vec<String>,
+    workspace_path: String,
+) -> Result<String, String> {
+    use agents::context_engineer::ContextEngineer;
+    use agents::MicroTask;
+    use std::path::Path;
+
+    // Get cached graph or load fresh
+    let graph = match grits::get_cached_graph() {
+        Some(g) => g,
+        None => grits::load_workspace_graph(&workspace_path)?,
+    };
+
+    // Create the micro-task
+    let task = MicroTask {
+        id: task_id,
+        description: task_description,
+        atom_type,
+        estimated_complexity: 3,
+        seed_symbols,
+    };
+
+    // Create the context engineer
+    let engineer = ContextEngineer::new();
+
+    // Extract context
+    let context_package = engineer.extract_context_with_graph(
+        &task,
+        &graph,
+        Path::new(&workspace_path),
+    )?;
+
+    // Return just the markdown
+    Ok(context_package.markdown)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -624,9 +854,15 @@ pub fn run() {
             init_runtime,
             execute_script,
             get_execution_log,
-            create_snapshot,
-            get_git_history,
             get_cwd,
+            // Shadow Git commands
+            create_snapshot,
+            rollback_snapshot,
+            rollback_to_snapshot,
+            squash_snapshots,
+            get_snapshots,
+            checkout_commit,
+            get_git_history,
             // Settings commands
             save_settings,
             load_settings,
@@ -639,7 +875,11 @@ pub fn run() {
             create_from_template,
             // L2 Orchestrator commands
             generate_execution_script,
-            parse_plan
+            parse_plan,
+            // L3 Context Engineer commands
+            extract_task_context,
+            extract_task_context_cached,
+            get_task_context_markdown
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

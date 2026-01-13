@@ -4,11 +4,13 @@
 pub mod interrogator;
 pub mod architect;
 pub mod orchestrator;
+pub mod context_engineer;
 
 // Re-exports
 pub use interrogator::Interrogator;
 pub use architect::Architect;
 pub use orchestrator::Orchestrator;
+pub use context_engineer::ContextEngineer;
 
 use serde::{Deserialize, Serialize};
 

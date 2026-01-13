@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { Circle, CheckCircle2, CircleDashed, ChevronRight, ChevronDown, FileText, AlertTriangle, Code, StickyNote, Hash } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Circle, CheckCircle2, CircleDashed, ChevronRight, ChevronDown, FileText, AlertTriangle, Code, StickyNote, Hash, RefreshCw } from 'lucide-react';
 import { MOCK_PLAN } from '../constants';
 import { Task } from '../types';
+import { parsePlan, ParsedPlan, ParsedTask } from '../hooks/useTauri';
 
 const StatusIcon = ({ status }: { status: Task['status'] }) => {
   switch (status) {
@@ -111,22 +112,102 @@ const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
   );
 };
 
-const PlanView: React.FC = () => {
+interface PlanViewProps {
+  planContent?: string;
+  onViewSource?: () => void;
+}
+
+// Convert ParsedTask to Task format for display
+function convertToTask(parsedTask: ParsedTask, depth: number = 0): Task {
+  return {
+    id: parsedTask.id,
+    title: parsedTask.description,
+    status: 'pending' as const,
+    depth,
+    details: {
+      notes: `Atom: ${parsedTask.atom_type} | Complexity: ${parsedTask.estimated_complexity}`,
+      issues: [],
+      snippet: parsedTask.seed_symbols.length > 0
+        ? `Seed symbols: ${parsedTask.seed_symbols.join(', ')}`
+        : undefined,
+    },
+    children: [],
+  };
+}
+
+const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
+  const [parsedPlan, setParsedPlan] = useState<ParsedPlan | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [showSource, setShowSource] = useState(false);
+
+  // Parse plan when content changes
+  useEffect(() => {
+    if (planContent) {
+      loadPlan(planContent);
+    }
+  }, [planContent]);
+
+  async function loadPlan(content: string) {
+    setLoading(true);
+    setError(null);
+    try {
+      const plan = await parsePlan(content);
+      setParsedPlan(plan);
+    } catch (e) {
+      setError(String(e));
+      console.error('Failed to parse plan:', e);
+    }
+    setLoading(false);
+  }
+
+  // Convert parsed tasks to display format
+  const displayTasks: Task[] = parsedPlan
+    ? parsedPlan.tasks.map(t => convertToTask(t, 0))
+    : MOCK_PLAN;
+
   return (
     <div className="h-full flex flex-col p-4 lg:p-6">
        <div className="mb-4 lg:mb-6 flex justify-between items-end">
            <div>
-               <h2 className="text-xl font-bold text-white">Execution Plan</h2>
-               <p className="text-zinc-400 text-sm mt-1">System 2 Decomposition • Recursive Depth: 3</p>
+               <h2 className="text-xl font-bold text-white">
+                 {parsedPlan ? parsedPlan.title : 'Execution Plan'}
+               </h2>
+               <p className="text-zinc-400 text-sm mt-1">
+                 {parsedPlan
+                   ? `${parsedPlan.task_count} tasks • ${parsedPlan.dependencies.length} dependencies`
+                   : 'System 2 Decomposition • Recursive Depth: 3'
+                 }
+               </p>
            </div>
-           <button className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors">
-               <FileText size={14} />
-               <span className="hidden sm:inline">View Source</span>
-           </button>
+           <div className="flex gap-2">
+             {loading && (
+               <RefreshCw size={14} className="animate-spin text-indigo-400" />
+             )}
+             <button
+               onClick={() => { setShowSource(!showSource); onViewSource?.(); }}
+               className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors"
+             >
+                 <FileText size={14} />
+                 <span className="hidden sm:inline">{showSource ? 'Hide Source' : 'View Source'}</span>
+             </button>
+           </div>
        </div>
-       
+
+       {error && (
+         <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-sm">
+           {error}
+         </div>
+       )}
+
+       {showSource && planContent && (
+         <div className="mb-4 bg-black rounded border border-zinc-800 p-4 max-h-48 overflow-y-auto">
+           <pre className="text-xs text-zinc-400 font-mono whitespace-pre-wrap">{planContent}</pre>
+         </div>
+       )}
+
        <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg overflow-y-auto p-2 scrollbar-thin">
-           {MOCK_PLAN.map(task => (
+           {displayTasks.map(task => (
                <TaskItem key={task.id} task={task} />
            ))}
        </div>

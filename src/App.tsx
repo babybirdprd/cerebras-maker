@@ -12,12 +12,13 @@ import PlanView from './components/PlanView';
 import GraphView from './components/GraphView';
 import ExecutionPanel from './components/ExecutionPanel';
 import TimeSlider from './components/TimeSlider';
+import { TimeMachine } from './components/TimeMachine';
 import Settings from './components/Settings';
 import PRDUpload from './components/PRDUpload';
 import ChatInput from './components/ChatInput';
 
 // Tauri hooks
-import { openProjectDialog, loadSymbolGraph, initRuntime, analyzePrd, sendInterrogationMessage, transformGraphForD3, ProjectTemplate, createFromTemplate } from './hooks/useTauri';
+import { openProjectDialog, loadSymbolGraph, initRuntime, analyzePrd, sendInterrogationMessage, completeInterrogation, transformGraphForD3, ProjectTemplate, createFromTemplate } from './hooks/useTauri';
 
 type ViewType = 'dashboard' | 'topology' | 'execution' | 'history' | 'upload' | 'interrogation';
 
@@ -30,6 +31,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [graphNodes, setGraphNodes] = useState(GRAPH_NODES);
   const [graphLinks, setGraphLinks] = useState(GRAPH_LINKS);
+  const [planContent, setPlanContent] = useState<string | null>(null);
 
   const handlePRDUpload = async (file: PRDFile) => {
     setPrdFile(file);
@@ -106,10 +108,26 @@ function App() {
       };
       setChatMessages(prev => [...prev, assistantMessage]);
 
-      // If interrogation is complete, move to planning
+      // If interrogation is complete, generate the plan
       if (response.is_final) {
-        setAgentState(AgentState.PLANNING);
-        setCurrentView('dashboard');
+        try {
+          // Build conversation history for plan generation
+          const conversation = [...chatMessages, userMessage, assistantMessage].map(m => ({
+            role: m.role,
+            content: m.content,
+          }));
+
+          const planResult = await completeInterrogation(conversation);
+          setPlanContent(planResult.plan_md);
+
+          setAgentState(AgentState.PLANNING);
+          setCurrentView('dashboard');
+        } catch (planError) {
+          console.error('Failed to generate plan:', planError);
+          // Still move to dashboard even if plan generation fails
+          setAgentState(AgentState.PLANNING);
+          setCurrentView('dashboard');
+        }
       }
     } catch (error) {
       // Fallback response if Tauri not available
@@ -185,7 +203,7 @@ function App() {
         return (
           <div className="h-full grid grid-cols-1 lg:grid-cols-2 gap-0">
             <div className="border-r border-zinc-800 overflow-hidden">
-              <PlanView />
+              <PlanView planContent={planContent || undefined} />
             </div>
             <div className="flex flex-col overflow-hidden">
               <div className="flex-1 p-4 lg:p-6 min-h-0">
@@ -215,11 +233,8 @@ function App() {
 
       case 'history':
         return (
-          <div className="h-full flex items-center justify-center text-zinc-500">
-            <div className="text-center">
-              <h2 className="text-xl font-bold text-white mb-2">Shadow Git History</h2>
-              <p>Use the time slider below to scrub through commits</p>
-            </div>
+          <div className="h-full p-4 lg:p-6">
+            <TimeMachine />
           </div>
         );
 
