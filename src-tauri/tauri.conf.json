@@ -94,54 +94,10 @@
       "endpoints": []
     },
     "shell": {
-      "open": true,
-      "scope": [
-        {
-          "name": "git",
-          "cmd": "git",
-          "args": true
-        },
-        {
-          "name": "cargo",
-          "cmd": "cargo",
-          "args": [
-            "check",
-            "build",
-            "test",
-            "clippy"
-          ]
-        },
-        {
-          "name": "npm",
-          "cmd": "npm",
-          "args": true
-        },
-        {
-          "name": "python",
-          "cmd": "python",
-          "args": [
-            "-m",
-            "pytest"
-          ]
-        }
-      ]
-    },
-    "notification": {
-      "all": true
+      "open": true
     },
     "fs": {
-      "scope": [
-        "$APP/**",
-        "$DOCUMENT/**",
-        "$HOME/**",
-        "$RESOURCE/**"
-      ]
-    },
-    "global-shortcut": {
-      "shortcuts": []
-    },
-    "window-state": {
-      "all": true
+      "requireLiteralLeadingDot": false
     }
   }
 }

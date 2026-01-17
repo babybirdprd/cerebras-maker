@@ -24,6 +24,9 @@ pub mod generators;
 // Project template system
 pub mod templates;
 
+// Knowledge Base module - pre-existing research and documentation
+pub mod knowledge_base;
+
 // Re-export maker_core types for convenience
 pub use maker_core::{AtomType, AtomResult, CodeModeRuntime, ShadowGit, ConsensusConfig, ConsensusResult};
 
@@ -42,14 +45,86 @@ static RUNTIME: Mutex<Option<CodeModeRuntime>> = Mutex::new(None);
 // Global ShadowGit instance for transactional file operations
 static SHADOW_GIT: Mutex<Option<ShadowGit>> = Mutex::new(None);
 
+// Global Knowledge Base instance
+static KNOWLEDGE_BASE: Mutex<Option<knowledge_base::KnowledgeBase>> = Mutex::new(None);
+
+// ============================================================================
+// Execution Metrics & Voting State
+// ============================================================================
+
+/// Execution metrics for the swarm dashboard
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct ExecutionMetrics {
+    /// Number of active atoms currently executing
+    pub active_atoms: usize,
+    /// Total atoms spawned in current session
+    pub total_atoms_spawned: usize,
+    /// Total tokens processed in current session
+    pub total_tokens: u64,
+    /// Tokens processed per second (rolling average)
+    pub tokens_per_second: f64,
+    /// Number of red flags detected
+    pub red_flag_count: usize,
+    /// Number of shadow commits (snapshots)
+    pub shadow_commits: usize,
+    /// Timestamp of last update
+    pub last_updated_ms: u64,
+}
+
+/// A voting candidate for display
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VotingCandidate {
+    pub id: usize,
+    pub snippet: String,
+    pub score: f64,
+    pub red_flags: Vec<String>,
+    pub status: String, // "pending", "accepted", "rejected"
+    pub votes: usize,
+}
+
+/// Current voting state
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+pub struct VotingState {
+    pub task_id: String,
+    pub task_description: String,
+    pub candidates: Vec<VotingCandidate>,
+    pub is_voting: bool,
+    pub winner_id: Option<usize>,
+}
+
+// Global execution metrics state
+static EXECUTION_METRICS: Mutex<ExecutionMetrics> = Mutex::new(ExecutionMetrics {
+    active_atoms: 0,
+    total_atoms_spawned: 0,
+    total_tokens: 0,
+    tokens_per_second: 0.0,
+    red_flag_count: 0,
+    shadow_commits: 0,
+    last_updated_ms: 0,
+});
+
+// Global voting state
+static VOTING_STATE: Mutex<VotingState> = Mutex::new(VotingState {
+    task_id: String::new(),
+    task_description: String::new(),
+    candidates: Vec::new(),
+    is_voting: false,
+    winner_id: None,
+});
+
 /// Module for grits-core integration functionality
 pub mod grits {
     use super::*;
+    use grits_core::topology::analysis::{InvariantResult, LayerViolation};
+    use grits_core::topology::layers::load_layer_config;
     use grits_core::topology::scanner::DirectoryScanner;
     use std::sync::Mutex;
 
     /// Cached SymbolGraph for the workspace (thread-safe)
     static WORKSPACE_GRAPH: Mutex<Option<SymbolGraph>> = Mutex::new(None);
+
+    /// Cached workspace path for layer config loading
+    static WORKSPACE_PATH: Mutex<Option<String>> = Mutex::new(None);
 
     /// Build a SymbolGraph from a workspace directory
     /// PRD 3.1: "Load the Semantic Graph (Cached in RAM)"
@@ -64,9 +139,12 @@ pub mod grits {
             .scan(path)
             .map_err(|e| format!("Failed to scan workspace: {}", e))?;
 
-        // Cache the graph
+        // Cache the graph and workspace path
         if let Ok(mut cached) = WORKSPACE_GRAPH.lock() {
             *cached = Some(graph.clone());
+        }
+        if let Ok(mut cached_path) = WORKSPACE_PATH.lock() {
+            *cached_path = Some(workspace_path.to_string());
         }
 
         Ok(graph)
@@ -75,6 +153,11 @@ pub mod grits {
     /// Get the cached workspace graph
     pub fn get_cached_graph() -> Option<SymbolGraph> {
         WORKSPACE_GRAPH.lock().ok().and_then(|g| g.clone())
+    }
+
+    /// Get the cached workspace path
+    pub fn get_cached_workspace_path() -> Option<String> {
+        WORKSPACE_PATH.lock().ok().and_then(|p| p.clone())
     }
 
     /// Assemble a MiniCodebase for context engineering
@@ -90,12 +173,29 @@ pub mod grits {
     }
 
     /// Perform red-flag check for architectural violations
-    /// PRD 3.2: "Architectural Red-Flagging" - Detect cycle membership via triangles
-    pub fn red_flag_check(graph: &SymbolGraph, previous_betti_1: usize) -> RedFlagResult {
+    /// PRD 3.2: "Architectural Red-Flagging" - Detect cycle membership via triangles and layer violations
+    pub fn red_flag_check(graph: &SymbolGraph, previous_betti_1: usize, workspace_path: Option<&str>) -> RedFlagResult {
         let analysis = TopologicalAnalysis::analyze(graph);
+
+        // Load layer config and check for layer violations
+        let (layer_violations, layer_config_loaded) = if let Some(ws_path) = workspace_path {
+            match load_layer_config(Path::new(ws_path)) {
+                Ok(config) => {
+                    let invariant_result = InvariantResult::check(graph, &config);
+                    (invariant_result.layer_violations, true)
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to load layer config: {}", e);
+                    (Vec::new(), false)
+                }
+            }
+        } else {
+            (Vec::new(), false)
+        };
 
         RedFlagResult {
             introduced_cycle: analysis.betti_1 > previous_betti_1,
+            has_layer_violations: !layer_violations.is_empty(),
             betti_1: analysis.betti_1,
             betti_0: analysis.betti_0,
             triangle_count: analysis.triangle_count,
@@ -105,18 +205,59 @@ pub mod grits {
                 .iter()
                 .map(|t| t.nodes.to_vec())
                 .collect(),
+            layer_violations,
+            layer_config_loaded,
         }
+    }
+
+    /// Check if proposed changes would introduce architectural violations (virtual apply)
+    /// PRD 3.2: Pre-check changes before applying them
+    pub fn virtual_red_flag_check(
+        graph: &SymbolGraph,
+        proposed_changes: &[ProposedChange],
+        workspace_path: Option<&str>,
+    ) -> RedFlagResult {
+        // Get current Betti_1 before changes
+        let current_analysis = TopologicalAnalysis::analyze(graph);
+        let previous_betti_1 = current_analysis.betti_1;
+
+        // Create a temporary graph with proposed changes applied
+        let mut temp_graph = graph.clone();
+        for change in proposed_changes {
+            // Add new symbols from proposed changes
+            if let Some(ref symbol) = change.new_symbol {
+                temp_graph.add_symbol(symbol.clone());
+            }
+            // Add new dependencies
+            for (from, to, relation) in &change.new_dependencies {
+                temp_graph.add_dependency(from, to, relation);
+            }
+        }
+
+        // Check the temporary graph
+        red_flag_check(&temp_graph, previous_betti_1, workspace_path)
+    }
+
+    /// A proposed change to be virtually applied for red-flag checking
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+    pub struct ProposedChange {
+        pub file_path: String,
+        pub new_symbol: Option<Symbol>,
+        pub new_dependencies: Vec<(String, String, String)>, // (from, to, relation)
     }
 
     /// Result of architectural red-flag check
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
     pub struct RedFlagResult {
         pub introduced_cycle: bool,
+        pub has_layer_violations: bool,
         pub betti_1: usize,
         pub betti_0: usize,
         pub triangle_count: usize,
         pub solid_score: f32,
         pub cycles_detected: Vec<Vec<String>>,
+        pub layer_violations: Vec<LayerViolation>,
+        pub layer_config_loaded: bool,
     }
 }
 
@@ -151,7 +292,19 @@ fn assemble_mini_codebase(
 #[tauri::command]
 fn check_red_flags(previous_betti_1: usize) -> Result<grits::RedFlagResult, String> {
     let graph = grits::get_cached_graph().ok_or("No cached graph. Call load_symbol_graph first.")?;
-    Ok(grits::red_flag_check(&graph, previous_betti_1))
+    let workspace_path = grits::get_cached_workspace_path();
+    Ok(grits::red_flag_check(&graph, previous_betti_1, workspace_path.as_deref()))
+}
+
+/// Check if proposed changes would introduce red flags (virtual apply)
+#[tauri::command]
+fn check_proposed_changes(
+    proposed_changes: Vec<grits::ProposedChange>,
+    _previous_betti_1: usize,
+) -> Result<grits::RedFlagResult, String> {
+    let graph = grits::get_cached_graph().ok_or("No cached graph. Call load_symbol_graph first.")?;
+    let workspace_path = grits::get_cached_workspace_path();
+    Ok(grits::virtual_red_flag_check(&graph, &proposed_changes, workspace_path.as_deref()))
 }
 
 /// Analyze topology and return full analysis
@@ -160,6 +313,549 @@ fn analyze_topology() -> Result<serde_json::Value, String> {
     let graph = grits::get_cached_graph().ok_or("No cached graph. Call load_symbol_graph first.")?;
     let analysis = TopologicalAnalysis::analyze(&graph);
     serde_json::to_value(&analysis).map_err(|e| e.to_string())
+}
+
+// ============================================================================
+// Multi-file Edit Validation Commands (PRD Section 3.2)
+// ============================================================================
+
+/// Input for multi-file edit validation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultiFileEdit {
+    pub file_path: String,
+    pub operation: String, // "create", "modify", "delete"
+    pub content: Option<String>,
+    pub language: Option<String>,
+}
+
+/// Result of multi-file validation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct MultiFileValidationResult {
+    pub is_safe: bool,
+    pub original_betti_1: usize,
+    pub new_betti_1: usize,
+    pub introduces_cycles: bool,
+    pub layer_violations: Vec<serde_json::Value>,
+    pub new_symbols: Vec<String>,
+    pub new_dependencies: Vec<(String, String, String)>,
+    pub warnings: Vec<String>,
+    pub errors: Vec<String>,
+    pub files_analyzed: usize,
+    pub cross_file_issues: Vec<String>,
+}
+
+/// Validate multiple file edits together for architectural violations
+/// Uses Grits VirtualApply to check proposed changes before applying
+#[tauri::command]
+fn validate_multi_file_edit(
+    workspace_path: String,
+    edits: Vec<MultiFileEdit>,
+) -> Result<MultiFileValidationResult, String> {
+    use grits_core::topology::virtual_apply::{ChangeType, ProposedChange, VirtualApply};
+    use grits_core::topology::layers::load_layer_config;
+    use std::path::Path;
+
+    // Ensure we have a symbol graph loaded
+    let graph = grits::get_cached_graph()
+        .ok_or("No cached graph. Call load_symbol_graph first.")?;
+
+    // Load layer config if available
+    let layer_config = load_layer_config(Path::new(&workspace_path)).ok();
+
+    // Convert edits to ProposedChanges
+    let proposed_changes: Vec<ProposedChange> = edits.iter().map(|edit| {
+        let change_type = match edit.operation.as_str() {
+            "create" => ChangeType::CreateFile,
+            "delete" => ChangeType::DeleteFile,
+            _ => ChangeType::ModifyFile,
+        };
+
+        let language = edit.language.clone().unwrap_or_else(|| {
+            // Detect from extension
+            if edit.file_path.ends_with(".rs") { "rust".to_string() }
+            else if edit.file_path.ends_with(".ts") || edit.file_path.ends_with(".tsx") { "typescript".to_string() }
+            else if edit.file_path.ends_with(".js") || edit.file_path.ends_with(".jsx") { "javascript".to_string() }
+            else if edit.file_path.ends_with(".py") { "python".to_string() }
+            else if edit.file_path.ends_with(".go") { "go".to_string() }
+            else { "unknown".to_string() }
+        });
+
+        ProposedChange {
+            file_path: edit.file_path.clone(),
+            change_type,
+            code_content: edit.content.clone().unwrap_or_default(),
+            language,
+        }
+    }).collect();
+
+    // Run VirtualApply validation
+    let virtual_apply = VirtualApply::new(graph.clone(), layer_config);
+    let result = virtual_apply.validate(&proposed_changes);
+
+    // Check for cross-file dependency issues
+    let mut cross_file_issues = Vec::new();
+
+    // Collect symbols by file
+    let mut symbols_by_file: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+    for (from, to, _) in &result.new_dependencies {
+        let from_file = from.split("::").next().unwrap_or(from);
+        symbols_by_file.entry(from_file.to_string()).or_default().push(to.clone());
+    }
+
+    // Check if new dependencies cross files in problematic ways
+    for (file, deps) in &symbols_by_file {
+        for dep in deps {
+            let dep_file = dep.split("::").next().unwrap_or(dep);
+            if file != dep_file && !dep_file.starts_with("std") && !dep_file.starts_with("core") {
+                // Check if the dependency target exists
+                if !graph.nodes.contains_key(dep) {
+                    cross_file_issues.push(format!(
+                        "New dependency from {} to {} (target may not exist)",
+                        file, dep
+                    ));
+                }
+            }
+        }
+    }
+
+    // Convert layer violations to JSON
+    let layer_violations: Vec<serde_json::Value> = result.layer_violations.iter().map(|v| {
+        serde_json::json!({
+            "from_symbol": v.from_symbol,
+            "from_layer": v.from_layer,
+            "to_symbol": v.to_symbol,
+            "to_layer": v.to_layer,
+            "message": v.message
+        })
+    }).collect();
+
+    Ok(MultiFileValidationResult {
+        is_safe: result.is_safe && cross_file_issues.is_empty(),
+        original_betti_1: result.original_betti_1,
+        new_betti_1: result.new_betti_1,
+        introduces_cycles: result.introduces_cycles,
+        layer_violations,
+        new_symbols: result.new_symbols,
+        new_dependencies: result.new_dependencies,
+        warnings: result.warnings,
+        errors: result.errors,
+        files_analyzed: edits.len(),
+        cross_file_issues,
+    })
+}
+
+/// Get a preview of what symbols and dependencies would be created by edits
+#[tauri::command]
+fn preview_edit_impact(
+    edits: Vec<MultiFileEdit>,
+) -> Result<serde_json::Value, String> {
+    use grits_core::topology::virtual_apply::{ChangeType, ProposedChange, VirtualApply};
+    use grits_core::topology::SymbolGraph;
+
+    // Use empty graph just to extract symbols
+    let graph = SymbolGraph::new();
+    let virtual_apply = VirtualApply::new(graph, None);
+
+    let proposed_changes: Vec<ProposedChange> = edits.iter().map(|edit| {
+        let change_type = match edit.operation.as_str() {
+            "create" => ChangeType::CreateFile,
+            "delete" => ChangeType::DeleteFile,
+            _ => ChangeType::ModifyFile,
+        };
+
+        let language = edit.language.clone().unwrap_or_else(|| {
+            if edit.file_path.ends_with(".rs") { "rust".to_string() }
+            else if edit.file_path.ends_with(".ts") || edit.file_path.ends_with(".tsx") { "typescript".to_string() }
+            else if edit.file_path.ends_with(".js") || edit.file_path.ends_with(".jsx") { "javascript".to_string() }
+            else if edit.file_path.ends_with(".py") { "python".to_string() }
+            else if edit.file_path.ends_with(".go") { "go".to_string() }
+            else { "unknown".to_string() }
+        });
+
+        ProposedChange {
+            file_path: edit.file_path.clone(),
+            change_type,
+            code_content: edit.content.clone().unwrap_or_default(),
+            language,
+        }
+    }).collect();
+
+    let result = virtual_apply.validate(&proposed_changes);
+
+    Ok(serde_json::json!({
+        "new_symbols": result.new_symbols,
+        "new_dependencies": result.new_dependencies,
+        "files_affected": edits.len(),
+    }))
+}
+
+// ============================================================================
+// Test Generation & Execution Commands (PRD Phase 3)
+// ============================================================================
+
+/// Test framework detection result
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TestFrameworkInfo {
+    pub framework: String,
+    pub test_command: String,
+    pub test_pattern: String,
+    pub config_file: Option<String>,
+}
+
+/// Detect test framework in workspace
+#[tauri::command]
+async fn detect_test_framework(workspace_path: String) -> Result<TestFrameworkInfo, String> {
+    use std::path::Path;
+
+    let ws = Path::new(&workspace_path);
+
+    // Check for Rust (Cargo.toml)
+    if ws.join("Cargo.toml").exists() {
+        return Ok(TestFrameworkInfo {
+            framework: "rust-cargo".to_string(),
+            test_command: "cargo test".to_string(),
+            test_pattern: "#[test]".to_string(),
+            config_file: Some("Cargo.toml".to_string()),
+        });
+    }
+
+    // Check for Node.js / TypeScript
+    if ws.join("package.json").exists() {
+        let pkg_content = std::fs::read_to_string(ws.join("package.json"))
+            .map_err(|e| e.to_string())?;
+
+        // Check for vitest
+        if pkg_content.contains("vitest") {
+            return Ok(TestFrameworkInfo {
+                framework: "vitest".to_string(),
+                test_command: "npm run test".to_string(),
+                test_pattern: "*.test.ts".to_string(),
+                config_file: ws.join("vitest.config.ts").exists().then(|| "vitest.config.ts".to_string()),
+            });
+        }
+
+        // Check for jest
+        if pkg_content.contains("jest") {
+            return Ok(TestFrameworkInfo {
+                framework: "jest".to_string(),
+                test_command: "npm test".to_string(),
+                test_pattern: "*.test.ts".to_string(),
+                config_file: ws.join("jest.config.js").exists().then(|| "jest.config.js".to_string()),
+            });
+        }
+
+        // Default Node.js
+        return Ok(TestFrameworkInfo {
+            framework: "node".to_string(),
+            test_command: "npm test".to_string(),
+            test_pattern: "*.test.js".to_string(),
+            config_file: Some("package.json".to_string()),
+        });
+    }
+
+    // Check for Python
+    if ws.join("pyproject.toml").exists() || ws.join("setup.py").exists() {
+        let is_pytest = ws.join("pytest.ini").exists() ||
+            ws.join("pyproject.toml").exists() &&
+            std::fs::read_to_string(ws.join("pyproject.toml"))
+                .unwrap_or_default()
+                .contains("pytest");
+
+        return Ok(TestFrameworkInfo {
+            framework: if is_pytest { "pytest".to_string() } else { "unittest".to_string() },
+            test_command: if is_pytest { "pytest".to_string() } else { "python -m unittest".to_string() },
+            test_pattern: "test_*.py".to_string(),
+            config_file: ws.join("pytest.ini").exists().then(|| "pytest.ini".to_string()),
+        });
+    }
+
+    // Check for Go
+    if ws.join("go.mod").exists() {
+        return Ok(TestFrameworkInfo {
+            framework: "go-test".to_string(),
+            test_command: "go test ./...".to_string(),
+            test_pattern: "*_test.go".to_string(),
+            config_file: Some("go.mod".to_string()),
+        });
+    }
+
+    Err("No test framework detected".to_string())
+}
+
+/// Test execution result
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct TestExecutionResult {
+    pub success: bool,
+    pub total_tests: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub skipped: usize,
+    pub duration_ms: u64,
+    pub output: String,
+    pub failed_tests: Vec<FailedTest>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FailedTest {
+    pub name: String,
+    pub file: Option<String>,
+    pub error: String,
+}
+
+/// Run tests in workspace
+#[tauri::command]
+async fn run_tests(
+    workspace_path: String,
+    test_pattern: Option<String>,
+    timeout_seconds: Option<u64>,
+) -> Result<TestExecutionResult, String> {
+    use std::process::Command;
+    use std::time::Instant;
+
+    let framework = detect_test_framework(workspace_path.clone()).await?;
+    let start = Instant::now();
+    let _timeout = timeout_seconds.unwrap_or(300); // 5 minutes default (reserved for future timeout implementation)
+
+    let mut cmd_parts: Vec<&str> = framework.test_command.split_whitespace().collect();
+    let program = cmd_parts.remove(0);
+
+    let mut cmd = Command::new(program);
+    cmd.args(&cmd_parts);
+    cmd.current_dir(&workspace_path);
+
+    // Add test pattern filter if specified
+    if let Some(pattern) = &test_pattern {
+        match framework.framework.as_str() {
+            "rust-cargo" => { cmd.arg("--").arg(pattern); }
+            "vitest" | "jest" => { cmd.arg(pattern); }
+            "pytest" => { cmd.arg("-k").arg(pattern); }
+            "go-test" => { cmd.arg("-run").arg(pattern); }
+            _ => {}
+        }
+    }
+
+    let output = cmd.output().map_err(|e| format!("Failed to run tests: {}", e))?;
+    let duration = start.elapsed().as_millis() as u64;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined_output = format!("{}\n{}", stdout, stderr);
+
+    // Parse test results based on framework
+    let (total, passed, failed, skipped, failed_tests) = parse_test_output(&framework.framework, &combined_output);
+
+    Ok(TestExecutionResult {
+        success: output.status.success(),
+        total_tests: total,
+        passed,
+        failed,
+        skipped,
+        duration_ms: duration,
+        output: combined_output,
+        failed_tests,
+    })
+}
+
+/// Parse test output to extract stats
+fn parse_test_output(framework: &str, output: &str) -> (usize, usize, usize, usize, Vec<FailedTest>) {
+    let mut total = 0;
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut skipped = 0;
+    let mut failed_tests = Vec::new();
+
+    match framework {
+        "rust-cargo" => {
+            // Parse: "test result: ok. 10 passed; 0 failed; 0 ignored"
+            for line in output.lines() {
+                if line.contains("test result:") {
+                    if let Some(caps) = line.split(';').collect::<Vec<_>>().first() {
+                        if let Some(num) = caps.split_whitespace().find(|s| s.parse::<usize>().is_ok()) {
+                            passed = num.parse().unwrap_or(0);
+                        }
+                    }
+                    // Extract failed count
+                    if let Some(failed_part) = line.split(';').nth(1) {
+                        if let Some(num) = failed_part.split_whitespace().find(|s| s.parse::<usize>().is_ok()) {
+                            failed = num.parse().unwrap_or(0);
+                        }
+                    }
+                    // Extract ignored count
+                    if let Some(ignored_part) = line.split(';').nth(2) {
+                        if let Some(num) = ignored_part.split_whitespace().find(|s| s.parse::<usize>().is_ok()) {
+                            skipped = num.parse().unwrap_or(0);
+                        }
+                    }
+                }
+                // Capture failed test names
+                if line.contains("FAILED") && line.contains("test ") {
+                    let test_name = line.replace("test ", "").replace(" ... FAILED", "").trim().to_string();
+                    failed_tests.push(FailedTest {
+                        name: test_name,
+                        file: None,
+                        error: "Test failed".to_string(),
+                    });
+                }
+            }
+            total = passed + failed + skipped;
+        }
+        "vitest" | "jest" => {
+            // Parse: "Tests: 1 passed, 1 total"
+            for line in output.lines() {
+                if line.contains("Tests:") || line.contains("Test Suites:") {
+                    for part in line.split(',') {
+                        let words: Vec<&str> = part.split_whitespace().collect();
+                        if words.len() >= 2 {
+                            let num: usize = words[0].parse().unwrap_or(0);
+                            let kind = words[1].to_lowercase();
+                            if kind.contains("passed") { passed += num; }
+                            else if kind.contains("failed") { failed += num; }
+                            else if kind.contains("skipped") { skipped += num; }
+                            else if kind.contains("total") { total = num; }
+                        }
+                    }
+                }
+            }
+            if total == 0 { total = passed + failed + skipped; }
+        }
+        "pytest" => {
+            // Parse: "5 passed, 1 failed, 2 skipped"
+            for line in output.lines() {
+                if line.contains(" passed") || line.contains(" failed") || line.contains(" skipped") {
+                    for part in line.split(',') {
+                        let words: Vec<&str> = part.split_whitespace().collect();
+                        if words.len() >= 2 {
+                            let num: usize = words[0].parse().unwrap_or(0);
+                            let kind = words[1].to_lowercase();
+                            if kind.contains("passed") { passed = num; }
+                            else if kind.contains("failed") { failed = num; }
+                            else if kind.contains("skipped") { skipped = num; }
+                        }
+                    }
+                }
+            }
+            total = passed + failed + skipped;
+        }
+        "go-test" => {
+            // Parse: "ok/FAIL package (duration)"
+            for line in output.lines() {
+                if line.starts_with("ok") { passed += 1; }
+                else if line.starts_with("FAIL") { failed += 1; }
+                else if line.contains("--- SKIP") { skipped += 1; }
+            }
+            total = passed + failed + skipped;
+        }
+        _ => {
+            // Generic: count lines with ok/fail/pass/error
+            for line in output.lines() {
+                let lower = line.to_lowercase();
+                if lower.contains("pass") || lower.contains("ok") { passed += 1; }
+                else if lower.contains("fail") || lower.contains("error") { failed += 1; }
+            }
+            total = passed + failed;
+        }
+    }
+
+    (total, passed, failed, skipped, failed_tests)
+}
+
+/// Generate test code for a given source file
+#[tauri::command]
+async fn generate_tests(
+    workspace_path: String,
+    source_file: String,
+    test_type: Option<String>, // "unit", "integration", "property"
+) -> Result<serde_json::Value, String> {
+    use crate::agents::atom_executor::{AtomExecutor, AtomInput};
+    use crate::llm::LlmConfig;
+    use crate::maker_core::SpawnFlags;
+
+    // Read the source file
+    let source_path = std::path::Path::new(&workspace_path).join(&source_file);
+    let source_content = std::fs::read_to_string(&source_path)
+        .map_err(|e| format!("Failed to read source file: {}", e))?;
+
+    // Detect language from extension
+    let language = if source_file.ends_with(".rs") { "rust" }
+        else if source_file.ends_with(".ts") || source_file.ends_with(".tsx") { "typescript" }
+        else if source_file.ends_with(".js") || source_file.ends_with(".jsx") { "javascript" }
+        else if source_file.ends_with(".py") { "python" }
+        else if source_file.ends_with(".go") { "go" }
+        else { "unknown" };
+
+    let test_type = test_type.unwrap_or_else(|| "unit".to_string());
+
+    // Build the test generation prompt
+    let prompt = format!(
+        r#"Generate {} tests for the following {} code.
+
+Source file: {}
+
+```{}
+{}
+```
+
+Requirements:
+1. Write comprehensive test cases covering all public functions/methods
+2. Include edge cases and error conditions
+3. Use the standard testing framework for this language
+4. Include meaningful test names that describe what is being tested
+5. Add comments explaining complex test logic
+
+Return ONLY the test code, no explanations."#,
+        test_type, language, source_file, language, source_content
+    );
+
+    // Execute using Tester atom
+    let input = AtomInput::new(AtomType::Tester, &prompt)
+        .with_flags(SpawnFlags {
+            require_json: false,
+            temperature: 0.3,
+            max_tokens: Some(4000),
+            red_flag_check: false,
+        });
+
+    // Get LLM config
+    let config = LlmConfig::cerebras();
+
+    let executor = AtomExecutor::new(config);
+    let result = executor.execute(input).await
+        .map_err(|e| format!("Test generation failed: {}", e))?;
+
+    // Determine test file path
+    let test_file = match language {
+        "rust" => {
+            if source_file.contains("/src/") {
+                source_file.replace("/src/", "/tests/").replace(".rs", "_test.rs")
+            } else {
+                source_file.replace(".rs", "_test.rs")
+            }
+        }
+        "typescript" | "javascript" => {
+            let ext = if source_file.ends_with(".tsx") { ".tsx" }
+                else if source_file.ends_with(".ts") { ".ts" }
+                else if source_file.ends_with(".jsx") { ".jsx" }
+                else { ".js" };
+            source_file.replace(ext, &format!(".test{}", ext))
+        }
+        "python" => {
+            let file_name = std::path::Path::new(&source_file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&source_file);
+            format!("tests/test_{}", file_name)
+        }
+        "go" => source_file.replace(".go", "_test.go"),
+        _ => format!("{}.test", source_file),
+    };
+
+    Ok(serde_json::json!({
+        "test_code": result.output,
+        "suggested_file": test_file,
+        "source_file": source_file,
+        "language": language,
+        "test_type": test_type,
+    }))
 }
 
 // ============================================================================
@@ -213,6 +909,219 @@ fn get_execution_log() -> Result<serde_json::Value, String> {
 
     let log = runtime.get_execution_log();
     serde_json::to_value(&log).map_err(|e| e.to_string())
+}
+
+/// Get real-time execution metrics for the swarm dashboard
+#[tauri::command]
+fn get_execution_metrics() -> Result<ExecutionMetrics, String> {
+    let metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    Ok(metrics.clone())
+}
+
+/// Update execution metrics (called internally when atoms execute)
+#[tauri::command]
+fn update_execution_metrics(
+    active_atoms: Option<usize>,
+    tokens_added: Option<u64>,
+    red_flags_added: Option<usize>,
+) -> Result<(), String> {
+    let mut metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    if let Some(active) = active_atoms {
+        metrics.active_atoms = active;
+    }
+
+    if let Some(tokens) = tokens_added {
+        let elapsed_secs = (now - metrics.last_updated_ms) as f64 / 1000.0;
+        if elapsed_secs > 0.0 {
+            // Rolling average of tokens per second
+            let instant_tps = tokens as f64 / elapsed_secs;
+            metrics.tokens_per_second = (metrics.tokens_per_second * 0.7) + (instant_tps * 0.3);
+        }
+        metrics.total_tokens += tokens;
+    }
+
+    if let Some(red_flags) = red_flags_added {
+        metrics.red_flag_count += red_flags;
+    }
+
+    metrics.last_updated_ms = now;
+
+    Ok(())
+}
+
+/// Increment atom spawn count and optionally shadow commits
+#[tauri::command]
+fn record_atom_spawned() -> Result<(), String> {
+    let mut metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    metrics.total_atoms_spawned += 1;
+    metrics.active_atoms += 1;
+    metrics.last_updated_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    Ok(())
+}
+
+/// Record atom completion
+#[tauri::command]
+fn record_atom_completed(tokens_used: u64, had_red_flag: bool) -> Result<(), String> {
+    let mut metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    if metrics.active_atoms > 0 {
+        metrics.active_atoms -= 1;
+    }
+
+    metrics.total_tokens += tokens_used;
+
+    if had_red_flag {
+        metrics.red_flag_count += 1;
+    }
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let elapsed_secs = (now - metrics.last_updated_ms) as f64 / 1000.0;
+    if elapsed_secs > 0.0 && tokens_used > 0 {
+        let instant_tps = tokens_used as f64 / elapsed_secs;
+        metrics.tokens_per_second = (metrics.tokens_per_second * 0.8) + (instant_tps * 0.2);
+    }
+
+    metrics.last_updated_ms = now;
+
+    Ok(())
+}
+
+/// Record a shadow commit (snapshot)
+#[tauri::command]
+fn record_shadow_commit() -> Result<(), String> {
+    let mut metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    metrics.shadow_commits += 1;
+
+    Ok(())
+}
+
+/// Reset execution metrics (e.g., when starting a new session)
+#[tauri::command]
+fn reset_execution_metrics() -> Result<(), String> {
+    let mut metrics = EXECUTION_METRICS.lock()
+        .map_err(|_| "Failed to acquire metrics lock")?;
+
+    *metrics = ExecutionMetrics::default();
+
+    Ok(())
+}
+
+/// Get current voting state
+#[tauri::command]
+fn get_voting_state() -> Result<VotingState, String> {
+    let state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    Ok(state.clone())
+}
+
+/// Start a voting session for a task
+#[tauri::command]
+fn start_voting(task_id: String, task_description: String) -> Result<(), String> {
+    let mut state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    *state = VotingState {
+        task_id,
+        task_description,
+        candidates: Vec::new(),
+        is_voting: true,
+        winner_id: None,
+    };
+
+    Ok(())
+}
+
+/// Add a voting candidate
+#[tauri::command]
+fn add_voting_candidate(
+    snippet: String,
+    score: f64,
+    red_flags: Vec<String>,
+) -> Result<usize, String> {
+    let mut state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    let id = state.candidates.len() + 1;
+    let status = if red_flags.is_empty() { "pending" } else { "rejected" };
+
+    state.candidates.push(VotingCandidate {
+        id,
+        snippet,
+        score,
+        red_flags,
+        status: status.to_string(),
+        votes: 0,
+    });
+
+    Ok(id)
+}
+
+/// Record a vote for a candidate
+#[tauri::command]
+fn record_vote(candidate_id: usize) -> Result<(), String> {
+    let mut state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    if let Some(candidate) = state.candidates.iter_mut().find(|c| c.id == candidate_id) {
+        candidate.votes += 1;
+    }
+
+    Ok(())
+}
+
+/// Complete voting with a winner
+#[tauri::command]
+fn complete_voting(winner_id: usize) -> Result<(), String> {
+    let mut state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    state.is_voting = false;
+    state.winner_id = Some(winner_id);
+
+    // Update candidate statuses
+    for candidate in &mut state.candidates {
+        if candidate.id == winner_id {
+            candidate.status = "accepted".to_string();
+        } else if candidate.status == "pending" {
+            candidate.status = "rejected".to_string();
+        }
+    }
+
+    Ok(())
+}
+
+/// Clear voting state
+#[tauri::command]
+fn clear_voting_state() -> Result<(), String> {
+    let mut state = VOTING_STATE.lock()
+        .map_err(|_| "Failed to acquire voting state lock")?;
+
+    *state = VotingState::default();
+
+    Ok(())
 }
 
 // ============================================================================
@@ -470,7 +1379,7 @@ fn get_llm_provider() -> Result<llm::LlmProvider, String> {
             provider: match interrogator_config.provider.as_str() {
                 "anthropic" => llm::ProviderType::Anthropic,
                 "cerebras" => llm::ProviderType::Cerebras,
-                "ollama" => llm::ProviderType::Ollama,
+                "openrouter" => llm::ProviderType::OpenRouter,
                 _ => llm::ProviderType::OpenAI,
             },
             model: interrogator_config.model.clone(),
@@ -557,9 +1466,21 @@ Do NOT output JSON. Output natural language."#;
     }
 }
 
+/// P2-1: Conversation message structure for maintaining history
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ConversationMessage {
+    role: String,
+    content: String,
+}
+
 /// Send a message to L1 and get a response
+/// P2-1: Now supports conversation history for multi-turn interactions
 #[tauri::command]
-async fn send_interrogation_message(message: String, context: serde_json::Value) -> Result<serde_json::Value, String> {
+async fn send_interrogation_message(
+    message: String,
+    context: serde_json::Value,
+    conversation_history: Option<Vec<ConversationMessage>>,
+) -> Result<serde_json::Value, String> {
     match get_llm_provider() {
         Ok(provider) => {
             let prd_content = context.get("prd")
@@ -579,10 +1500,22 @@ Your role:
 
 Keep responses concise and focused. Ask ONE question at a time."#, prd_content);
 
-            let messages = vec![
-                llm::Message::system(&system_prompt),
-                llm::Message::user(&message),
-            ];
+            // Build messages array with conversation history
+            let mut messages = vec![llm::Message::system(&system_prompt)];
+
+            // Add conversation history if provided (P2-1: Multi-turn support)
+            if let Some(history) = conversation_history {
+                for msg in history {
+                    match msg.role.as_str() {
+                        "user" => messages.push(llm::Message::user(&msg.content)),
+                        "assistant" => messages.push(llm::Message::assistant(&msg.content)),
+                        _ => {} // Ignore unknown roles
+                    }
+                }
+            }
+
+            // Add the current message
+            messages.push(llm::Message::user(&message));
 
             match provider.complete(messages).await {
                 Ok(response) => {
@@ -619,7 +1552,7 @@ Keep responses concise and focused. Ask ONE question at a time."#, prd_content);
 /// Complete interrogation and generate PLAN.md
 #[tauri::command]
 async fn complete_interrogation(conversation: Vec<serde_json::Value>) -> Result<serde_json::Value, String> {
-    // TODO: Generate actual PLAN.md from conversation using L1
+    // Build conversation text for the LLM
     let conversation_text: Vec<String> = conversation.iter()
         .filter_map(|msg| {
             let role = msg.get("role")?.as_str()?;
@@ -628,14 +1561,136 @@ async fn complete_interrogation(conversation: Vec<serde_json::Value>) -> Result<
         })
         .collect();
 
-    Ok(serde_json::json!({
+    // Try to use LLM to generate PLAN.md
+    match get_llm_provider() {
+        Ok(provider) => {
+            let system_prompt = r#"You are the L1 Product Orchestrator in the Cerebras-MAKER system.
+Your role is to synthesize a conversation about a project into a structured PLAN.md document.
+
+The PLAN.md format must follow this structure:
+1. Start with a title: # Project Plan: [Project Name]
+2. Include an overview section: ## Overview
+3. Break down into phases: ## Phase 1: [Phase Name]
+4. Each phase contains tasks as checkboxes: - [ ] Task description
+
+Task descriptions should be atomic and actionable. Include keywords that help identify the task type:
+- "Create/Implement/Add" for coding tasks
+- "Test/Verify/Assert" for testing tasks
+- "Review/Check/Validate" for review tasks
+- "Design/Architect/Interface" for design tasks
+- "Analyze/Topology/Dependency" for analysis tasks
+
+Example output:
+```markdown
+# Project Plan: User Authentication System
+
+## Overview
+Implement a secure user authentication system with JWT tokens.
+
+## Phase 1: Core Authentication
+- [ ] Create User model with email and password fields
+- [ ] Implement password hashing using bcrypt
+- [ ] Create login endpoint with JWT token generation
+- [ ] Add token validation middleware
+
+## Phase 2: Testing & Validation
+- [ ] Test user registration flow
+- [ ] Verify password hashing security
+- [ ] Review authentication middleware for vulnerabilities
+```
+
+Output ONLY the PLAN.md content, no additional commentary."#;
+
+            let user_prompt = format!(
+                "Based on the following conversation, generate a PLAN.md document:\n\n{}",
+                conversation_text.join("\n\n")
+            );
+
+            let messages = vec![
+                llm::Message::system(system_prompt),
+                llm::Message::user(&user_prompt),
+            ];
+
+            match provider.complete(messages).await {
+                Ok(response) => {
+                    let plan_md = extract_plan_md(&response.content);
+
+                    // Parse the generated plan to extract tasks
+                    let orchestrator = agents::Orchestrator::new();
+                    let tasks = match orchestrator.parse_plan_md(&plan_md) {
+                        Ok(plan) => plan.micro_tasks.iter().map(|t| serde_json::json!({
+                            "id": t.id,
+                            "description": t.description,
+                            "atom_type": t.atom_type
+                        })).collect::<Vec<_>>(),
+                        Err(_) => Vec::new(),
+                    };
+
+                    Ok(serde_json::json!({
+                        "status": "complete",
+                        "plan_md": plan_md,
+                        "tasks": tasks
+                    }))
+                }
+                Err(_e) => {
+                    // Fall back to mock if LLM fails
+                    Ok(generate_mock_plan(&conversation_text))
+                }
+            }
+        }
+        Err(_) => {
+            // Fall back to mock if no provider configured
+            Ok(generate_mock_plan(&conversation_text))
+        }
+    }
+}
+
+/// Extract PLAN.md content from LLM response (handles markdown code blocks)
+fn extract_plan_md(response: &str) -> String {
+    // Try to find markdown in code blocks first
+    if let Some(start) = response.find("```markdown") {
+        if let Some(end) = response[start..].find("```\n").or_else(|| response[start..].rfind("```")) {
+            let md_start = start + 11; // Skip "```markdown"
+            let md_end = start + end;
+            if md_start < md_end {
+                return response[md_start..md_end].trim().to_string();
+            }
+        }
+    }
+
+    // Try generic code blocks
+    if let Some(start) = response.find("```") {
+        let after_start = start + 3;
+        let content_start = response[after_start..]
+            .find('\n')
+            .map(|i| after_start + i + 1)
+            .unwrap_or(after_start);
+        if let Some(end) = response[content_start..].find("```") {
+            return response[content_start..content_start + end].trim().to_string();
+        }
+    }
+
+    // Return as-is if no code blocks
+    response.trim().to_string()
+}
+
+/// Generate a mock PLAN.md when LLM is not available
+fn generate_mock_plan(conversation_text: &[String]) -> serde_json::Value {
+    serde_json::json!({
         "status": "complete",
-        "plan_md": format!("# Project Plan\n\n## Overview\n\nGenerated from {} messages.\n\n## Conversation Summary\n\n{}",
-            conversation.len(),
+        "plan_md": format!(
+            "# Project Plan\n\n## Overview\n\nGenerated from {} messages.\n\n## Phase 1: Implementation\n\n- [ ] Analyze requirements from conversation\n- [ ] Design system architecture\n- [ ] Implement core functionality\n- [ ] Test implementation\n- [ ] Review and validate\n\n## Conversation Summary\n\n{}",
+            conversation_text.len(),
             conversation_text.join("\n\n")
         ),
-        "tasks": []
-    }))
+        "tasks": [
+            {"id": "t1", "description": "Analyze requirements from conversation", "atom_type": "Analyzer"},
+            {"id": "t2", "description": "Design system architecture", "atom_type": "Architect"},
+            {"id": "t3", "description": "Implement core functionality", "atom_type": "Coder"},
+            {"id": "t4", "description": "Test implementation", "atom_type": "Tester"},
+            {"id": "t5", "description": "Review and validate", "atom_type": "Reviewer"}
+        ]
+    })
 }
 
 // ============================================================================
@@ -733,7 +1788,7 @@ fn extract_task_context(
     seed_symbols: Vec<String>,
     workspace_path: String,
 ) -> Result<serde_json::Value, String> {
-    use agents::context_engineer::{ContextConfig, ContextEngineer};
+    use agents::context_engineer::ContextEngineer;
     use agents::MicroTask;
     use std::path::Path;
 
@@ -976,8 +2031,540 @@ fn get_atom_types() -> serde_json::Value {
         {"id": "Validator", "name": "Validator", "description": "Validate requirements", "max_tokens": 500},
         {"id": "Tester", "name": "Tester", "description": "Write tests", "max_tokens": 2000},
         {"id": "Architect", "name": "Architect", "description": "Design interfaces", "max_tokens": 1500},
-        {"id": "GritsAnalyzer", "name": "GritsAnalyzer", "description": "Analyze topology", "max_tokens": 1000}
+        {"id": "GritsAnalyzer", "name": "GritsAnalyzer", "description": "Analyze topology", "max_tokens": 1000},
+        {"id": "RLMProcessor", "name": "RLMProcessor", "description": "Process large contexts recursively", "max_tokens": 4000}
     ])
+}
+
+// ============================================================================
+// RLM (Recursive Language Model) Commands
+// Based on: "Recursive Language Models: Scaling Context with Recursive Prompt Decomposition"
+// ============================================================================
+
+use maker_core::{RLMConfig, RLMTrajectoryStep, RLMOperation, ContextType, create_shared_store};
+
+/// Global RLM context store for cross-command access
+static RLM_STORE: Mutex<Option<maker_core::SharedRLMContextStore>> = Mutex::new(None);
+
+/// Global RLM trajectory for visualization
+static RLM_TRAJECTORY: Mutex<Vec<RLMTrajectoryStep>> = Mutex::new(Vec::new());
+
+/// Initialize the RLM context store
+#[tauri::command]
+fn init_rlm_store() -> Result<String, String> {
+    let store = create_shared_store();
+    if let Ok(mut global) = RLM_STORE.lock() {
+        *global = Some(store);
+    }
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        traj.clear();
+    }
+    Ok("RLM store initialized".to_string())
+}
+
+/// Load a large context into the RLM store
+#[tauri::command]
+fn rlm_load_context(
+    var_name: String,
+    content: String,
+    context_type: String,
+) -> Result<serde_json::Value, String> {
+    let store = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let store = store.as_ref()
+        .ok_or("RLM store not initialized. Call init_rlm_store first.")?;
+
+    let ctx_type = match context_type.as_str() {
+        "minicodebase" => ContextType::MiniCodebase,
+        "symbolgraph" => ContextType::SymbolGraph,
+        "file" => ContextType::File,
+        _ => ContextType::String,
+    };
+
+    let length = content.len();
+
+    if let Ok(mut s) = store.lock() {
+        s.load_variable(&var_name, content, ctx_type);
+    }
+
+    // Log trajectory
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        let step_num = traj.len();
+        traj.push(RLMTrajectoryStep {
+            step: step_num,
+            operation: RLMOperation::LoadContext {
+                var_name: var_name.clone(),
+                length,
+            },
+            description: format!("Loaded '{}' ({} chars)", var_name, length),
+            data: None,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    Ok(serde_json::json!({
+        "var_name": var_name,
+        "length": length,
+        "context_type": context_type
+    }))
+}
+
+/// Peek at a portion of a context variable
+#[tauri::command]
+fn rlm_peek_context(
+    var_name: String,
+    start: usize,
+    end: usize,
+) -> Result<String, String> {
+    let store = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let store = store.as_ref()
+        .ok_or("RLM store not initialized")?;
+
+    let result = if let Ok(s) = store.lock() {
+        s.peek(&var_name, start, end)
+            .ok_or_else(|| format!("Context variable '{}' not found", var_name))?
+    } else {
+        return Err("Failed to lock store".to_string());
+    };
+
+    // Log trajectory
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        let step_num = traj.len();
+        traj.push(RLMTrajectoryStep {
+            step: step_num,
+            operation: RLMOperation::Peek {
+                var_name: var_name.clone(),
+                start,
+                end,
+            },
+            description: format!("Peeked '{}' [{}-{}]", var_name, start, end),
+            data: None,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    Ok(result)
+}
+
+/// Get the length of a context variable
+#[tauri::command]
+fn rlm_context_length(var_name: String) -> Result<usize, String> {
+    let guard = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let shared_store = guard.as_ref()
+        .ok_or("RLM store not initialized")?
+        .clone();
+
+    drop(guard);
+
+    let inner = shared_store.lock()
+        .map_err(|_| "Failed to lock inner store")?;
+
+    inner.length(&var_name)
+        .ok_or_else(|| format!("Context variable '{}' not found", var_name))
+}
+
+/// Chunk a context variable into smaller pieces
+#[tauri::command]
+fn rlm_chunk_context(
+    var_name: String,
+    chunk_size: usize,
+) -> Result<serde_json::Value, String> {
+    let store = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let store = store.as_ref()
+        .ok_or("RLM store not initialized")?;
+
+    let chunks = if let Ok(mut s) = store.lock() {
+        s.chunk(&var_name, chunk_size)
+    } else {
+        return Err("Failed to lock store".to_string());
+    };
+
+    let num_chunks = chunks.len();
+
+    // Log trajectory
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        let step_num = traj.len();
+        traj.push(RLMTrajectoryStep {
+            step: step_num,
+            operation: RLMOperation::Chunk {
+                var_name: var_name.clone(),
+                num_chunks,
+            },
+            description: format!("Chunked '{}' into {} pieces", var_name, num_chunks),
+            data: None,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    Ok(serde_json::json!({
+        "var_name": var_name,
+        "chunk_size": chunk_size,
+        "num_chunks": num_chunks,
+        "chunks": chunks
+    }))
+}
+
+/// Filter a context variable using regex
+#[tauri::command]
+fn rlm_regex_filter(
+    var_name: String,
+    pattern: String,
+) -> Result<serde_json::Value, String> {
+    let store = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let store = store.as_ref()
+        .ok_or("RLM store not initialized")?;
+
+    let matches = if let Ok(s) = store.lock() {
+        s.regex_filter(&var_name, &pattern)
+            .map_err(|e| format!("Regex error: {}", e))?
+    } else {
+        return Err("Failed to lock store".to_string());
+    };
+
+    let num_matches = matches.len();
+
+    // Log trajectory
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        let step_num = traj.len();
+        traj.push(RLMTrajectoryStep {
+            step: step_num,
+            operation: RLMOperation::RegexFilter {
+                var_name: var_name.clone(),
+                pattern: pattern.clone(),
+                matches: num_matches,
+            },
+            description: format!("Regex '{}' on '{}': {} matches", pattern, var_name, num_matches),
+            data: None,
+            timestamp_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+        });
+    }
+
+    Ok(serde_json::json!({
+        "var_name": var_name,
+        "pattern": pattern,
+        "num_matches": num_matches,
+        "matches": matches
+    }))
+}
+
+/// P2-2: Execute an RLM-aware atom with iterative loop
+/// Based on RLM paper: max_iterations=20, max_depth=1
+#[tauri::command]
+async fn execute_rlm_atom(
+    _atom_type: String,
+    task: String,
+    context_var: String,
+    max_iterations: usize,
+) -> Result<serde_json::Value, String> {
+    use agents::atom_executor::{AtomExecutor, AtomInput};
+    use maker_core::{SpawnFlags, RLMAction, RLMExecutionState, RLMConfig, RLMResult};
+
+    let config = RLMConfig::default();
+    let effective_max_iterations = if max_iterations > 0 { max_iterations } else { config.max_iterations };
+    let start_time = std::time::Instant::now();
+
+    // Get context info from store
+    let (context_length, context_preview) = {
+        let guard = RLM_STORE.lock()
+            .map_err(|_| "Failed to acquire RLM store lock")?;
+        let shared_store = guard.as_ref()
+            .ok_or("RLM store not initialized")?
+            .clone();
+        drop(guard);
+        let inner = shared_store.lock()
+            .map_err(|_| "Failed to lock inner store")?;
+        let len = inner.length(&context_var).unwrap_or(0);
+        let preview = inner.peek(&context_var, 0, 1000).unwrap_or_default();
+        (len, preview)
+    };
+
+    // Initialize execution state
+    let mut state = RLMExecutionState::new();
+    state.add_step(
+        RLMOperation::Start,
+        format!("RLM execution started for '{}' ({} chars, max {} iterations)",
+                context_var, context_length, effective_max_iterations),
+        None
+    );
+
+    // Log to global trajectory
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        traj.extend(state.trajectory.clone());
+    }
+
+    // Get LLM config
+    let llm_config = get_llm_config_from_settings()?;
+    let executor = AtomExecutor::new(llm_config.clone());
+
+    // Build context info string
+    let context_info = format!(
+        "**Context Variable**: `{}`\n**Context Length**: {} characters\n**Preview (first 1000 chars)**:\n```\n{}\n```",
+        context_var, context_length, context_preview
+    );
+
+    // P2-2: Iterative RLM loop (based on RLM paper Section 3.1)
+    let mut final_answer: Option<String> = None;
+
+    while state.iteration < effective_max_iterations {
+        state.iteration += 1;
+
+        // Build iteration prompt
+        let prompt = state.build_iteration_prompt(&task, &context_info);
+
+        // Execute LLM call
+        let flags = SpawnFlags {
+            require_json: true,
+            temperature: 0.1,
+            max_tokens: Some(4000),
+            red_flag_check: false, // Don't red-flag RLM iterations
+        };
+        let input = AtomInput::new(AtomType::RLMProcessor, &prompt).with_flags(flags);
+
+        let result = match executor.execute(input).await {
+            Ok(r) => r,
+            Err(e) => {
+                state.add_step(
+                    RLMOperation::Error { message: e.clone() },
+                    format!("Iteration {} failed: {}", state.iteration, e),
+                    None
+                );
+                break;
+            }
+        };
+
+        // Parse the action from LLM output
+        let action = match RLMAction::parse(&result.output) {
+            Ok(a) => a,
+            Err(e) => {
+                state.add_observation(format!("Parse error: {}. Raw output: {}", e,
+                    result.output.chars().take(200).collect::<String>()));
+                continue;
+            }
+        };
+
+        // Execute the action
+        match action {
+            RLMAction::Peek { var_name, start, end } => {
+                let peek_result = {
+                    let guard = RLM_STORE.lock().map_err(|_| "Lock error")?;
+                    let store = guard.as_ref().ok_or("Store not initialized")?;
+                    let inner = store.lock().map_err(|_| "Inner lock error")?;
+                    inner.peek(&var_name, start, end).unwrap_or_else(|| format!("Variable '{}' not found", var_name))
+                };
+                state.add_step(
+                    RLMOperation::Peek { var_name: var_name.clone(), start, end },
+                    format!("Peeked '{}' [{}-{}]: {} chars", var_name, start, end, peek_result.len()),
+                    None
+                );
+                state.add_observation(format!("peek({}, {}, {}) = \"{}...\"",
+                    var_name, start, end, peek_result.chars().take(100).collect::<String>()));
+            }
+            RLMAction::Chunk { var_name, chunk_size } => {
+                let num_chunks = {
+                    let guard = RLM_STORE.lock().map_err(|_| "Lock error")?;
+                    let store = guard.as_ref().ok_or("Store not initialized")?;
+                    let mut inner = store.lock().map_err(|_| "Inner lock error")?;
+                    inner.chunk(&var_name, chunk_size).len()
+                };
+                state.add_step(
+                    RLMOperation::Chunk { var_name: var_name.clone(), num_chunks },
+                    format!("Chunked '{}' into {} pieces of {} chars", var_name, num_chunks, chunk_size),
+                    None
+                );
+                state.add_observation(format!("chunk({}, {}) = {} chunks", var_name, chunk_size, num_chunks));
+            }
+            RLMAction::RegexFilter { var_name, pattern } => {
+                let matches = {
+                    let guard = RLM_STORE.lock().map_err(|_| "Lock error")?;
+                    let store = guard.as_ref().ok_or("Store not initialized")?;
+                    let inner = store.lock().map_err(|_| "Inner lock error")?;
+                    inner.regex_filter(&var_name, &pattern).unwrap_or_default()
+                };
+                let num_matches = matches.len();
+                state.add_step(
+                    RLMOperation::RegexFilter { var_name: var_name.clone(), pattern: pattern.clone(), matches: num_matches },
+                    format!("Regex '{}' on '{}': {} matches", pattern, var_name, num_matches),
+                    Some(serde_json::json!(matches.iter().take(5).collect::<Vec<_>>()))
+                );
+                state.add_observation(format!("regex_filter({}, \"{}\") = {} matches: {:?}",
+                    var_name, pattern, num_matches, matches.iter().take(3).collect::<Vec<_>>()));
+            }
+            RLMAction::SubQuery { prompt } => {
+                // Check depth limit (max_depth=1 means sub-calls are regular LLMs)
+                if state.depth >= config.max_depth {
+                    state.add_observation(format!("Sub-query depth limit ({}) reached", config.max_depth));
+                    continue;
+                }
+                state.sub_calls += 1;
+                state.add_step(
+                    RLMOperation::SubQuery { prompt_preview: prompt.chars().take(100).collect(), depth: state.depth + 1 },
+                    format!("Sub-query at depth {}", state.depth + 1),
+                    None
+                );
+                // Execute sub-query as regular LLM (not RLM)
+                let sub_input = AtomInput::new(AtomType::Coder, &prompt)
+                    .with_flags(SpawnFlags { temperature: 0.1, ..Default::default() });
+                match executor.execute(sub_input).await {
+                    Ok(sub_result) => {
+                        state.add_step(
+                            RLMOperation::SubResult { result_preview: sub_result.output.chars().take(100).collect() },
+                            "Sub-query completed".to_string(),
+                            None
+                        );
+                        state.add_observation(format!("llm_query result: \"{}...\"",
+                            sub_result.output.chars().take(200).collect::<String>()));
+                    }
+                    Err(e) => {
+                        state.add_observation(format!("Sub-query failed: {}", e));
+                    }
+                }
+            }
+            RLMAction::Final { answer } => {
+                state.add_step(
+                    RLMOperation::Final { answer_preview: answer.chars().take(100).collect() },
+                    format!("Final answer after {} iterations", state.iteration),
+                    None
+                );
+                final_answer = Some(answer);
+                break;
+            }
+            RLMAction::Continue { reasoning } => {
+                state.add_observation(format!("Thinking: {}", reasoning));
+            }
+        }
+
+        // Update global trajectory
+        if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+            *traj = state.trajectory.clone();
+        }
+    }
+
+    // Build result
+    let execution_time_ms = start_time.elapsed().as_millis() as u64;
+    let result = if let Some(answer) = final_answer {
+        RLMResult {
+            success: true,
+            output: answer,
+            iterations: state.iteration,
+            sub_calls: state.sub_calls,
+            total_tokens: 0,
+            trajectory: state.trajectory.clone(),
+            errors: Vec::new(),
+            execution_time_ms,
+        }
+    } else {
+        RLMResult {
+            success: false,
+            output: format!("Max iterations ({}) reached without final answer", effective_max_iterations),
+            iterations: state.iteration,
+            sub_calls: state.sub_calls,
+            total_tokens: 0,
+            trajectory: state.trajectory.clone(),
+            errors: vec!["Max iterations reached".to_string()],
+            execution_time_ms,
+        }
+    };
+
+    // Final trajectory update
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        *traj = state.trajectory;
+    }
+
+    serde_json::to_value(&result).map_err(|e| e.to_string())
+}
+
+/// Get the RLM execution trajectory for visualization
+#[tauri::command]
+fn get_rlm_trajectory() -> Result<serde_json::Value, String> {
+    let trajectory = RLM_TRAJECTORY.lock()
+        .map_err(|_| "Failed to acquire trajectory lock")?;
+
+    serde_json::to_value(&*trajectory).map_err(|e| e.to_string())
+}
+
+/// Clear the RLM trajectory
+#[tauri::command]
+fn clear_rlm_trajectory() -> Result<String, String> {
+    if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
+        traj.clear();
+    }
+    Ok("Trajectory cleared".to_string())
+}
+
+/// List all context variables in the RLM store
+#[tauri::command]
+fn rlm_list_contexts() -> Result<serde_json::Value, String> {
+    let store = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let store = store.as_ref()
+        .ok_or("RLM store not initialized")?;
+
+    let vars = if let Ok(s) = store.lock() {
+        s.list_variables()
+    } else {
+        return Err("Failed to lock store".to_string());
+    };
+
+    Ok(serde_json::json!(vars))
+}
+
+/// Clear a context variable from the RLM store
+#[tauri::command]
+fn rlm_clear_context(var_name: String) -> Result<bool, String> {
+    let guard = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock")?;
+
+    let shared_store = guard.as_ref()
+        .ok_or("RLM store not initialized")?
+        .clone();
+
+    drop(guard);
+
+    let mut inner = shared_store.lock()
+        .map_err(|_| "Failed to lock inner store")?;
+
+    Ok(inner.remove(&var_name).is_some())
+}
+
+/// Get RLM configuration
+#[tauri::command]
+fn get_rlm_config() -> serde_json::Value {
+    let config = RLMConfig::default();
+    serde_json::json!({
+        "max_depth": config.max_depth,
+        "max_iterations": config.max_iterations,
+        "default_chunk_size": config.default_chunk_size,
+        "rlm_threshold": config.rlm_threshold,
+        "use_sub_model": config.use_sub_model
+    })
+}
+
+/// Check if context size exceeds RLM threshold
+#[tauri::command]
+fn should_use_rlm(context_length: usize) -> bool {
+    context_length >= RLMConfig::default().rlm_threshold
 }
 
 /// Helper to get LLM config from saved settings
@@ -1025,6 +2612,1146 @@ fn get_llm_config_from_settings() -> Result<LlmConfig, String> {
     Err("No LLM provider configured. Please set an API key in Settings.".to_string())
 }
 
+// ============================================================================
+// GitHub Integration Commands
+// ============================================================================
+
+/// Initialize a git repository in the workspace
+#[tauri::command]
+async fn git_init(workspace_path: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["init"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok("Repository initialized".to_string())
+}
+
+/// Add a remote to the repository
+#[tauri::command]
+async fn git_add_remote(workspace_path: String, name: String, url: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["remote", "add", &name, &url])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Check if remote already exists
+        if stderr.contains("already exists") {
+            // Update existing remote
+            let _ = std::process::Command::new("git")
+                .current_dir(&workspace_path)
+                .args(["remote", "set-url", &name, &url])
+                .output();
+            return Ok(format!("Remote '{}' updated to {}", name, url));
+        }
+        return Err(stderr);
+    }
+    Ok(format!("Remote '{}' added: {}", name, url))
+}
+
+/// Get remote information
+#[tauri::command]
+async fn git_get_remotes(workspace_path: String) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["remote", "-v"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let remotes: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 2 {
+                Some(serde_json::json!({
+                    "name": parts[0],
+                    "url": parts[1],
+                    "type": parts.get(2).unwrap_or(&"")
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "remotes": remotes }))
+}
+
+/// Push changes to remote
+#[tauri::command]
+async fn git_push(workspace_path: String, remote: String, branch: String, set_upstream: bool) -> Result<String, String> {
+    let mut args = vec!["push", &remote, &branch];
+    if set_upstream {
+        args.insert(1, "-u");
+    }
+
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(format!("Pushed to {}/{}", remote, branch))
+}
+
+/// Get current branch name
+#[tauri::command]
+async fn git_current_branch(workspace_path: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+/// Get repository status
+#[tauri::command]
+async fn git_status(workspace_path: String) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["status", "--porcelain"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let changes: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            if line.len() >= 3 {
+                let status = &line[0..2];
+                let file = &line[3..];
+                Some(serde_json::json!({
+                    "status": status.trim(),
+                    "file": file
+                }))
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    let is_clean = changes.is_empty();
+
+    Ok(serde_json::json!({
+        "is_clean": is_clean,
+        "changes": changes,
+        "change_count": changes.len()
+    }))
+}
+
+/// Clone a repository
+#[tauri::command]
+async fn git_clone(url: String, target_path: String) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .args(["clone", &url, &target_path])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(format!("Cloned {} to {}", url, target_path))
+}
+
+/// Stage files for commit
+#[tauri::command]
+async fn git_add(workspace_path: String, paths: Vec<String>) -> Result<String, String> {
+    let mut args = vec!["add"];
+    let path_refs: Vec<&str> = paths.iter().map(|s| s.as_str()).collect();
+    args.extend(path_refs);
+
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(format!("Staged {} files", paths.len()))
+}
+
+/// Commit staged changes
+#[tauri::command]
+async fn git_commit(workspace_path: String, message: String) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["commit", "-m", &message])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // Check if it's just "nothing to commit"
+        if stderr.contains("nothing to commit") {
+            return Ok(serde_json::json!({
+                "success": false,
+                "message": "Nothing to commit"
+            }));
+        }
+        return Err(stderr);
+    }
+
+    // Get the commit hash
+    let hash_output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .map_err(|e| format!("Failed to get commit hash: {}", e))?;
+
+    let commit_hash = String::from_utf8_lossy(&hash_output.stdout).trim().to_string();
+
+    Ok(serde_json::json!({
+        "success": true,
+        "commit_hash": commit_hash,
+        "message": message
+    }))
+}
+
+/// Create or switch branches
+#[tauri::command]
+async fn git_branch(workspace_path: String, branch_name: String, create: bool) -> Result<String, String> {
+    let args = if create {
+        vec!["checkout", "-b", &branch_name]
+    } else {
+        vec!["checkout", &branch_name]
+    };
+
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    if create {
+        Ok(format!("Created and switched to branch '{}'", branch_name))
+    } else {
+        Ok(format!("Switched to branch '{}'", branch_name))
+    }
+}
+
+/// List all branches
+#[tauri::command]
+async fn git_list_branches(workspace_path: String) -> Result<serde_json::Value, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["branch", "-a", "--format=%(refname:short)|%(objectname:short)|%(upstream:short)"])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let branches: Vec<serde_json::Value> = output_str
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split('|').collect();
+            serde_json::json!({
+                "name": parts.first().unwrap_or(&""),
+                "commit": parts.get(1).unwrap_or(&""),
+                "upstream": parts.get(2).unwrap_or(&"")
+            })
+        })
+        .collect();
+
+    // Get current branch
+    let current = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["branch", "--show-current"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "branches": branches,
+        "current": current
+    }))
+}
+
+/// Pull changes from remote
+#[tauri::command]
+async fn git_pull(workspace_path: String, remote: String, branch: String, rebase: bool) -> Result<String, String> {
+    let mut args = vec!["pull", &remote, &branch];
+    if rebase {
+        args.push("--rebase");
+    }
+
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Get diff of changes
+#[tauri::command]
+async fn git_diff(workspace_path: String, staged: bool, file_path: Option<String>) -> Result<String, String> {
+    let mut args = vec!["diff"];
+    if staged {
+        args.push("--cached");
+    }
+    if let Some(ref path) = file_path {
+        args.push("--");
+        args.push(path);
+    }
+
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(&args)
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Get commit log
+#[tauri::command]
+async fn git_log(workspace_path: String, count: Option<usize>) -> Result<serde_json::Value, String> {
+    let count_str = count.unwrap_or(20).to_string();
+    let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
+        .args(["log", "--format=%H|%s|%an|%ae|%aI", "-n", &count_str])
+        .output()
+        .map_err(|e| format!("Failed to run git: {}", e))?;
+
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+    }
+
+    let output_str = String::from_utf8_lossy(&output.stdout);
+    let commits: Vec<serde_json::Value> = output_str
+        .lines()
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            let parts: Vec<&str> = line.split('|').collect();
+            serde_json::json!({
+                "hash": parts.first().unwrap_or(&""),
+                "message": parts.get(1).unwrap_or(&""),
+                "author": parts.get(2).unwrap_or(&""),
+                "email": parts.get(3).unwrap_or(&""),
+                "date": parts.get(4).unwrap_or(&"")
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "commits": commits }))
+}
+
+// ============================================================================
+// GitHub Actions & Deployment Automation
+// ============================================================================
+
+/// Project type for workflow generation
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WorkflowConfig {
+    pub project_type: String,       // "tauri", "react", "node", "rust"
+    pub node_version: Option<String>,
+    pub rust_version: Option<String>,
+    pub deploy_target: Option<String>,  // "vercel", "netlify", "github-pages"
+    pub run_tests: bool,
+    pub run_lint: bool,
+}
+
+/// Generate GitHub Actions workflow
+#[tauri::command]
+async fn generate_github_workflow(workspace_path: String, config: WorkflowConfig) -> Result<serde_json::Value, String> {
+    let workflow = match config.project_type.as_str() {
+        "tauri" => generate_tauri_workflow(&config),
+        "react" | "vite" => generate_react_workflow(&config),
+        "node" => generate_node_workflow(&config),
+        "rust" => generate_rust_workflow(&config),
+        _ => generate_generic_workflow(&config),
+    };
+
+    // Create .github/workflows directory
+    let workflows_dir = std::path::Path::new(&workspace_path).join(".github").join("workflows");
+    std::fs::create_dir_all(&workflows_dir)
+        .map_err(|e| format!("Failed to create workflows directory: {}", e))?;
+
+    // Write workflow file
+    let workflow_path = workflows_dir.join("ci.yml");
+    std::fs::write(&workflow_path, &workflow)
+        .map_err(|e| format!("Failed to write workflow: {}", e))?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "path": workflow_path.to_string_lossy(),
+        "content": workflow
+    }))
+}
+
+fn generate_tauri_workflow(config: &WorkflowConfig) -> String {
+    let node_version = config.node_version.as_deref().unwrap_or("20");
+    let rust_version = config.rust_version.as_deref().unwrap_or("stable");
+
+    format!(r#"name: Tauri CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macos-latest, ubuntu-22.04, windows-latest]
+
+    runs-on: ${{{{ matrix.platform }}}}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '{node_version}'
+          cache: 'npm'
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: {rust_version}
+
+      - name: Install dependencies (Ubuntu)
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+      {}{}
+      - name: Build Tauri app
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{{{ secrets.GITHUB_TOKEN }}}}
+"#,
+        if config.run_lint { "\n      - name: Lint\n        run: npm run lint\n" } else { "" },
+        if config.run_tests { "\n      - name: Test\n        run: npm test\n" } else { "" }
+    )
+}
+
+fn generate_react_workflow(config: &WorkflowConfig) -> String {
+    let node_version = config.node_version.as_deref().unwrap_or("20");
+    let deploy_step = match config.deploy_target.as_deref() {
+        Some("vercel") => r#"
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          vercel-args: '--prod'"#,
+        Some("netlify") => r#"
+      - name: Deploy to Netlify
+        uses: nwtgck/actions-netlify@v2
+        with:
+          publish-dir: './dist'
+          production-branch: main
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          deploy-message: 'Deploy from GitHub Actions'
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}
+          NETLIFY_SITE_ID: ${{ secrets.NETLIFY_SITE_ID }}"#,
+        Some("github-pages") => r#"
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: './dist'
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4"#,
+        _ => "",
+    };
+
+    format!(r#"name: React CI/CD
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '{node_version}'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+      {}{}
+      - name: Build
+        run: npm run build
+{deploy_step}
+"#,
+        if config.run_lint { "\n      - name: Lint\n        run: npm run lint\n" } else { "" },
+        if config.run_tests { "\n      - name: Test\n        run: npm test\n" } else { "" }
+    )
+}
+
+fn generate_node_workflow(config: &WorkflowConfig) -> String {
+    let node_version = config.node_version.as_deref().unwrap_or("20");
+
+    format!(r#"name: Node.js CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        node-version: [{node_version}]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js ${{{{ matrix.node-version }}}}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{{{ matrix.node-version }}}}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+      {}{}
+      - name: Build
+        run: npm run build --if-present
+"#,
+        if config.run_lint { "\n      - name: Lint\n        run: npm run lint\n" } else { "" },
+        if config.run_tests { "\n      - name: Test\n        run: npm test\n" } else { "" }
+    )
+}
+
+fn generate_rust_workflow(config: &WorkflowConfig) -> String {
+    let rust_version = config.rust_version.as_deref().unwrap_or("stable");
+
+    format!(r#"name: Rust CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+        with:
+          toolchain: {rust_version}
+          components: rustfmt, clippy
+      {}{}
+      - name: Build
+        run: cargo build --verbose
+"#,
+        if config.run_lint { "\n      - name: Check format\n        run: cargo fmt --all -- --check\n\n      - name: Clippy\n        run: cargo clippy -- -D warnings\n" } else { "" },
+        if config.run_tests { "\n      - name: Run tests\n        run: cargo test --verbose\n" } else { "" }
+    )
+}
+
+fn generate_generic_workflow(config: &WorkflowConfig) -> String {
+    format!(r#"name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: echo "Add your build steps here"
+      {}
+"#,
+        if config.run_tests { "\n      - name: Test\n        run: echo \"Add your test steps here\"\n" } else { "" }
+    )
+}
+
+/// Generate deployment configuration files
+#[tauri::command]
+async fn generate_deploy_config(workspace_path: String, platform: String) -> Result<serde_json::Value, String> {
+    let (filename, content) = match platform.as_str() {
+        "vercel" => ("vercel.json", serde_json::json!({
+            "buildCommand": "npm run build",
+            "outputDirectory": "dist",
+            "framework": "vite",
+            "rewrites": [
+                { "source": "/(.*)", "destination": "/index.html" }
+            ]
+        }).to_string()),
+        "netlify" => ("netlify.toml", r#"[build]
+  command = "npm run build"
+  publish = "dist"
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+
+[build.environment]
+  NODE_VERSION = "20"
+"#.to_string()),
+        "github-pages" => {
+            // For GitHub Pages, we need to update vite.config
+            let vite_config = r#"// Add this to your vite.config.ts
+export default defineConfig({
+  base: '/<repository-name>/', // Replace with your repo name
+  // ... other config
+})
+"#;
+            ("_github-pages-notes.md", format!("# GitHub Pages Setup\n\n1. Enable GitHub Pages in repository settings\n2. Set source to 'GitHub Actions'\n3. Update vite.config.ts:\n\n```typescript\n{}\n```", vite_config))
+        },
+        _ => return Err(format!("Unknown platform: {}", platform)),
+    };
+
+    let config_path = std::path::Path::new(&workspace_path).join(&filename);
+    std::fs::write(&config_path, &content)
+        .map_err(|e| format!("Failed to write config: {}", e))?;
+
+    Ok(serde_json::json!({
+        "success": true,
+        "platform": platform,
+        "path": config_path.to_string_lossy(),
+        "content": content
+    }))
+}
+
+// ============================================================================
+// Crawl4AI Commands - Web Crawling & Research
+// ============================================================================
+
+/// Crawl a single URL and return the content
+#[tauri::command]
+async fn crawl_url(url: String, convert_to_markdown: bool) -> Result<serde_json::Value, String> {
+    use crawl4ai::{HttpCrawler, HttpCrawlConfig};
+
+    let config = HttpCrawlConfig {
+        convert_to_markdown,
+        filter_content: true,
+        ..Default::default()
+    };
+
+    let crawler = HttpCrawler::with_config(config)
+        .map_err(|e| format!("Failed to create crawler: {}", e))?;
+
+    let result = crawler.crawl(&url).await
+        .map_err(|e| format!("Crawl failed: {}", e))?;
+
+    Ok(serde_json::json!({
+        "url": result.url,
+        "status_code": result.status_code,
+        "title": result.title,
+        "markdown": result.markdown,
+        "cleaned_content": result.cleaned_content,
+        "duration_ms": result.duration_ms
+    }))
+}
+
+/// Crawl multiple URLs in parallel for documentation research
+#[tauri::command]
+async fn research_docs(urls: Vec<String>) -> Result<serde_json::Value, String> {
+    use crawl4ai::{HttpCrawler, HttpCrawlConfig};
+
+    let config = HttpCrawlConfig {
+        convert_to_markdown: true,
+        filter_content: true,
+        timeout_secs: 30,
+        ..Default::default()
+    };
+
+    let crawler = HttpCrawler::with_config(config)
+        .map_err(|e| format!("Failed to create crawler: {}", e))?;
+
+    let url_refs: Vec<&str> = urls.iter().map(|s| s.as_str()).collect();
+    let results = crawler.crawl_many(&url_refs).await;
+
+    let mut documents = Vec::new();
+    let mut errors = Vec::new();
+
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(r) => documents.push(serde_json::json!({
+                "url": r.url,
+                "title": r.title,
+                "markdown": r.markdown,
+                "status_code": r.status_code
+            })),
+            Err(e) => errors.push(serde_json::json!({
+                "url": urls.get(i).cloned().unwrap_or_default(),
+                "error": e.to_string()
+            })),
+        }
+    }
+
+    Ok(serde_json::json!({
+        "documents": documents,
+        "errors": errors,
+        "total_urls": urls.len(),
+        "success_count": documents.len(),
+        "error_count": errors.len()
+    }))
+}
+
+/// Extract structured content from a URL using CSS or XPath selectors
+#[tauri::command]
+async fn extract_content(
+    url: String,
+    strategy_type: String,
+    schema: serde_json::Value
+) -> Result<serde_json::Value, String> {
+    use crawl4ai::{HttpCrawler, HttpCrawlConfig, JsonCssExtractionStrategy, JsonXPathExtractionStrategy};
+
+    let config = HttpCrawlConfig::default();
+    let crawler = HttpCrawler::with_config(config)
+        .map_err(|e| format!("Failed to create crawler: {}", e))?;
+
+    let result = crawler.crawl(&url).await
+        .map_err(|e| format!("Crawl failed: {}", e))?;
+
+    let extracted = match strategy_type.as_str() {
+        "css" => {
+            let strategy = JsonCssExtractionStrategy::new(schema);
+            strategy.extract(&result.html)
+        },
+        "xpath" => {
+            let strategy = JsonXPathExtractionStrategy::new(schema);
+            strategy.extract(&result.html)
+        },
+        _ => return Err(format!("Unknown strategy type: {}. Use 'css' or 'xpath'", strategy_type))
+    };
+
+    Ok(serde_json::json!({
+        "url": result.url,
+        "title": result.title,
+        "extracted": extracted,
+        "count": extracted.len()
+    }))
+}
+
+// ============================================================================
+// Knowledge Base Commands
+// ============================================================================
+
+/// Initialize or get the knowledge base
+fn get_or_init_kb() -> Result<(), String> {
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    if guard.is_none() {
+        *guard = Some(knowledge_base::KnowledgeBase::new());
+    }
+    Ok(())
+}
+
+/// Add a document to the knowledge base with explicit type
+#[tauri::command]
+fn kb_add_document(name: String, content: String, doc_type: String) -> Result<String, String> {
+    get_or_init_kb()?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
+    let parsed_type = knowledge_base::DocumentType::from_str(&doc_type);
+    let id = kb.add_document(name, content, parsed_type);
+    Ok(id)
+}
+
+/// Add a document with automatic type classification
+#[tauri::command]
+fn kb_add_document_auto(name: String, content: String) -> Result<serde_json::Value, String> {
+    get_or_init_kb()?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
+    let (id, doc_type) = kb.add_document_auto(name, content);
+    Ok(serde_json::json!({
+        "id": id,
+        "doc_type": format!("{:?}", doc_type),
+        "auto_classified": true
+    }))
+}
+
+/// Classify document content without adding it
+#[tauri::command]
+fn kb_classify_document(content: String, filename: String) -> Result<String, String> {
+    let doc_type = knowledge_base::DocumentClassifier::classify(&content, &filename);
+    Ok(format!("{:?}", doc_type).to_lowercase())
+}
+
+/// Add web research to the knowledge base
+#[tauri::command]
+fn kb_add_web_research(url: String, title: String, content: String) -> Result<String, String> {
+    get_or_init_kb()?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
+    let id = kb.add_web_research(url, title, content);
+    Ok(id)
+}
+
+/// Remove a document from the knowledge base
+#[tauri::command]
+fn kb_remove_document(id: String) -> Result<(), String> {
+    get_or_init_kb()?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
+    if kb.remove_document(&id) {
+        Ok(())
+    } else {
+        Err(format!("Document with id '{}' not found", id))
+    }
+}
+
+/// Get all documents from the knowledge base
+#[tauri::command]
+fn kb_get_documents() -> Result<Vec<knowledge_base::KnowledgeDocument>, String> {
+    get_or_init_kb()?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
+    Ok(kb.get_all_documents().clone())
+}
+
+/// Compile all knowledge into a single context string for LLM consumption
+#[tauri::command]
+fn kb_compile_context() -> Result<String, String> {
+    get_or_init_kb()?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
+    Ok(kb.compile_context())
+}
+
+/// Compile context with token budget
+#[tauri::command]
+fn kb_compile_context_with_budget(max_tokens: usize) -> Result<String, String> {
+    get_or_init_kb()?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
+    Ok(kb.compile_context_with_budget(Some(max_tokens)))
+}
+
+/// Compile context optimized for L1 Interrogator
+#[tauri::command]
+fn kb_compile_for_interrogator() -> Result<String, String> {
+    get_or_init_kb()?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
+    Ok(kb.compile_for_interrogator())
+}
+
+/// Get knowledge base stats
+#[tauri::command]
+fn kb_get_stats() -> Result<serde_json::Value, String> {
+    get_or_init_kb()?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
+
+    Ok(serde_json::json!({
+        "document_count": kb.documents.len(),
+        "web_research_count": kb.web_research.len(),
+        "total_tokens": kb.total_tokens(),
+        "documents_by_type": kb.documents.iter()
+            .fold(std::collections::HashMap::<String, usize>::new(), |mut acc, doc| {
+                *acc.entry(format!("{:?}", doc.doc_type)).or_insert(0) += 1;
+                acc
+            })
+    }))
+}
+
+// ============================================================================
+// Session Persistence Commands
+// ============================================================================
+
+/// Session data structure for persistence
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SessionData {
+    /// Session ID (UUID)
+    pub id: String,
+    /// Session name (user-provided or auto-generated)
+    pub name: String,
+    /// Workspace path
+    pub workspace_path: String,
+    /// PRD content (if any)
+    pub prd_content: Option<String>,
+    /// PRD filename
+    pub prd_filename: Option<String>,
+    /// Conversation history (serialized)
+    pub conversation_history: Vec<serde_json::Value>,
+    /// Plan content (if any)
+    pub plan_content: Option<String>,
+    /// Knowledge base documents (serialized)
+    pub kb_documents: Vec<serde_json::Value>,
+    /// Current view/panel
+    pub current_view: String,
+    /// Timestamp when session was created
+    pub created_at_ms: u64,
+    /// Timestamp when session was last updated
+    pub updated_at_ms: u64,
+}
+
+/// Get the sessions directory path
+fn get_sessions_dir() -> Result<std::path::PathBuf, String> {
+    let home = dirs::home_dir().ok_or("Could not find home directory")?;
+    let sessions_dir = home.join(".cerebras-maker").join("sessions");
+    std::fs::create_dir_all(&sessions_dir)
+        .map_err(|e| format!("Failed to create sessions directory: {}", e))?;
+    Ok(sessions_dir)
+}
+
+/// Save current session state
+#[tauri::command]
+fn save_session(
+    session_name: String,
+    workspace_path: String,
+    prd_content: Option<String>,
+    prd_filename: Option<String>,
+    conversation_history: Vec<serde_json::Value>,
+    plan_content: Option<String>,
+    current_view: String,
+) -> Result<SessionData, String> {
+    let sessions_dir = get_sessions_dir()?;
+
+    // Generate session ID
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Get KB documents
+    let kb_documents = {
+        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock")?;
+        if let Some(kb) = guard.as_ref() {
+            kb.documents.iter()
+                .map(|doc| serde_json::json!({
+                    "name": doc.name,
+                    "content": doc.content,
+                    "doc_type": format!("{:?}", doc.doc_type),
+                    "metadata": doc.metadata,
+                    "auto_classified": doc.auto_classified,
+                    "word_count": doc.word_count,
+                }))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+
+    let session = SessionData {
+        id: session_id.clone(),
+        name: session_name,
+        workspace_path,
+        prd_content,
+        prd_filename,
+        conversation_history,
+        plan_content,
+        kb_documents,
+        current_view,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+
+    // Save to file
+    let session_file = sessions_dir.join(format!("{}.json", session_id));
+    let json = serde_json::to_string_pretty(&session)
+        .map_err(|e| format!("Failed to serialize session: {}", e))?;
+    std::fs::write(&session_file, json)
+        .map_err(|e| format!("Failed to write session file: {}", e))?;
+
+    Ok(session)
+}
+
+/// Update an existing session
+#[tauri::command]
+fn update_session(
+    session_id: String,
+    prd_content: Option<String>,
+    conversation_history: Vec<serde_json::Value>,
+    plan_content: Option<String>,
+    current_view: String,
+) -> Result<SessionData, String> {
+    let sessions_dir = get_sessions_dir()?;
+    let session_file = sessions_dir.join(format!("{}.json", session_id));
+
+    // Load existing session
+    let content = std::fs::read_to_string(&session_file)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+    let mut session: SessionData = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse session: {}", e))?;
+
+    // Update fields
+    session.prd_content = prd_content;
+    session.conversation_history = conversation_history;
+    session.plan_content = plan_content;
+    session.current_view = current_view;
+    session.updated_at_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    // Update KB documents
+    session.kb_documents = {
+        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock")?;
+        if let Some(kb) = guard.as_ref() {
+            kb.documents.iter()
+                .map(|doc| serde_json::json!({
+                    "name": doc.name,
+                    "content": doc.content,
+                    "doc_type": format!("{:?}", doc.doc_type),
+                    "metadata": doc.metadata,
+                    "auto_classified": doc.auto_classified,
+                    "word_count": doc.word_count,
+                }))
+                .collect()
+        } else {
+            Vec::new()
+        }
+    };
+
+    // Save updated session
+    let json = serde_json::to_string_pretty(&session)
+        .map_err(|e| format!("Failed to serialize session: {}", e))?;
+    std::fs::write(&session_file, json)
+        .map_err(|e| format!("Failed to write session file: {}", e))?;
+
+    Ok(session)
+}
+
+/// Load a session by ID
+#[tauri::command]
+fn load_session(session_id: String) -> Result<SessionData, String> {
+    let sessions_dir = get_sessions_dir()?;
+    let session_file = sessions_dir.join(format!("{}.json", session_id));
+
+    let content = std::fs::read_to_string(&session_file)
+        .map_err(|e| format!("Failed to read session file: {}", e))?;
+    let session: SessionData = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse session: {}", e))?;
+
+    Ok(session)
+}
+
+/// List all saved sessions
+#[tauri::command]
+fn list_sessions() -> Result<Vec<serde_json::Value>, String> {
+    let sessions_dir = get_sessions_dir()?;
+
+    let mut sessions = Vec::new();
+
+    for entry in std::fs::read_dir(&sessions_dir)
+        .map_err(|e| format!("Failed to read sessions directory: {}", e))?
+    {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+
+        if path.extension().map_or(false, |ext| ext == "json") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Ok(session) = serde_json::from_str::<SessionData>(&content) {
+                    sessions.push(serde_json::json!({
+                        "id": session.id,
+                        "name": session.name,
+                        "workspace_path": session.workspace_path,
+                        "created_at_ms": session.created_at_ms,
+                        "updated_at_ms": session.updated_at_ms,
+                        "has_prd": session.prd_content.is_some(),
+                        "has_plan": session.plan_content.is_some(),
+                        "message_count": session.conversation_history.len(),
+                        "kb_document_count": session.kb_documents.len(),
+                    }));
+                }
+            }
+        }
+    }
+
+    // Sort by updated_at_ms descending (most recent first)
+    sessions.sort_by(|a, b| {
+        let a_time = a["updated_at_ms"].as_u64().unwrap_or(0);
+        let b_time = b["updated_at_ms"].as_u64().unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+
+    Ok(sessions)
+}
+
+/// Delete a session by ID
+#[tauri::command]
+fn delete_session(session_id: String) -> Result<(), String> {
+    let sessions_dir = get_sessions_dir()?;
+    let session_file = sessions_dir.join(format!("{}.json", session_id));
+
+    std::fs::remove_file(&session_file)
+        .map_err(|e| format!("Failed to delete session file: {}", e))?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1059,12 +3786,27 @@ pub fn run() {
             load_symbol_graph,
             assemble_mini_codebase,
             check_red_flags,
+            check_proposed_changes,
             analyze_topology,
             // MAKER runtime commands
             init_runtime,
             execute_script,
             get_execution_log,
             get_cwd,
+            // Execution metrics commands
+            get_execution_metrics,
+            update_execution_metrics,
+            record_atom_spawned,
+            record_atom_completed,
+            record_shadow_commit,
+            reset_execution_metrics,
+            // Voting state commands
+            get_voting_state,
+            start_voting,
+            add_voting_candidate,
+            record_vote,
+            complete_voting,
+            clear_voting_state,
             // Shadow Git commands
             create_snapshot,
             rollback_snapshot,
@@ -1095,8 +3837,528 @@ pub fn run() {
             execute_atom_with_context,
             parse_coder_output,
             parse_reviewer_output,
-            get_atom_types
+            get_atom_types,
+            // RLM (Recursive Language Model) commands
+            init_rlm_store,
+            rlm_load_context,
+            rlm_peek_context,
+            rlm_context_length,
+            rlm_chunk_context,
+            rlm_regex_filter,
+            execute_rlm_atom,
+            get_rlm_trajectory,
+            clear_rlm_trajectory,
+            rlm_list_contexts,
+            rlm_clear_context,
+            get_rlm_config,
+            should_use_rlm,
+            // Crawl4AI commands
+            crawl_url,
+            research_docs,
+            extract_content,
+            // GitHub integration commands
+            git_init,
+            git_add_remote,
+            git_get_remotes,
+            git_push,
+            git_current_branch,
+            git_status,
+            git_clone,
+            git_add,
+            git_commit,
+            git_branch,
+            git_list_branches,
+            git_pull,
+            git_diff,
+            git_log,
+            // GitHub Actions & Deployment
+            generate_github_workflow,
+            generate_deploy_config,
+            // Multi-file Edit Validation commands
+            validate_multi_file_edit,
+            preview_edit_impact,
+            // Test Generation & Execution commands
+            detect_test_framework,
+            run_tests,
+            generate_tests,
+            // Knowledge Base commands
+            kb_add_document,
+            kb_add_document_auto,
+            kb_classify_document,
+            kb_add_web_research,
+            kb_remove_document,
+            kb_get_documents,
+            kb_compile_context,
+            kb_compile_context_with_budget,
+            kb_compile_for_interrogator,
+            kb_get_stats,
+            // Session Persistence commands
+            save_session,
+            update_session,
+            load_session,
+            list_sessions,
+            delete_session
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    // ========================================================================
+    // Git Integration Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_git_init_success() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        let result = git_init(workspace_path.clone()).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "Repository initialized");
+
+        // Verify .git directory was created
+        assert!(dir.path().join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_git_init_invalid_path() {
+        let result = git_init("/nonexistent/path/that/does/not/exist".to_string()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_git_add_remote_success() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo first
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Add remote
+        let result = git_add_remote(
+            workspace_path.clone(),
+            "origin".to_string(),
+            "https://github.com/example/repo.git".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("origin"));
+    }
+
+    #[tokio::test]
+    async fn test_git_add_remote_updates_existing() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo first
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Add remote
+        git_add_remote(
+            workspace_path.clone(),
+            "origin".to_string(),
+            "https://github.com/example/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        // Try to add same remote again (should update)
+        let result = git_add_remote(
+            workspace_path.clone(),
+            "origin".to_string(),
+            "https://github.com/example/other-repo.git".to_string(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().contains("updated"));
+    }
+
+    #[tokio::test]
+    async fn test_git_get_remotes_empty() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo first
+        git_init(workspace_path.clone()).await.unwrap();
+
+        let result = git_get_remotes(workspace_path).await;
+        assert!(result.is_ok());
+
+        let json = result.unwrap();
+        let remotes = json["remotes"].as_array().unwrap();
+        assert!(remotes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_git_get_remotes_with_remote() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo and add remote
+        git_init(workspace_path.clone()).await.unwrap();
+        git_add_remote(
+            workspace_path.clone(),
+            "origin".to_string(),
+            "https://github.com/example/repo.git".to_string(),
+        )
+        .await
+        .unwrap();
+
+        let result = git_get_remotes(workspace_path).await;
+        assert!(result.is_ok());
+
+        let json = result.unwrap();
+        let remotes = json["remotes"].as_array().unwrap();
+        assert!(!remotes.is_empty());
+        assert_eq!(remotes[0]["name"], "origin");
+    }
+
+    #[tokio::test]
+    async fn test_git_current_branch_default() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Configure git user for commit
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .unwrap();
+
+        // Create initial commit so we have a branch
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test content").unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["commit", "-m", "initial"])
+            .output()
+            .unwrap();
+
+        let result = git_current_branch(workspace_path).await;
+        assert!(result.is_ok());
+        // Default branch is either "master" or "main" depending on git config
+        let branch = result.unwrap();
+        assert!(branch == "master" || branch == "main");
+    }
+
+    #[tokio::test]
+    async fn test_git_status_clean() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Configure git user for commit
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .unwrap();
+
+        // Create initial commit
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test content").unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["commit", "-m", "initial"])
+            .output()
+            .unwrap();
+
+        let result = git_status(workspace_path).await;
+        assert!(result.is_ok());
+
+        let json = result.unwrap();
+        assert!(json["is_clean"].as_bool().unwrap());
+        assert_eq!(json["change_count"].as_i64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_git_status_dirty() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Configure git user for commit
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.email", "test@example.com"])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["config", "user.name", "Test User"])
+            .output()
+            .unwrap();
+
+        // Create initial commit
+        let file_path = dir.path().join("test.txt");
+        fs::write(&file_path, "test content").unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["add", "."])
+            .output()
+            .unwrap();
+        std::process::Command::new("git")
+            .current_dir(&workspace_path)
+            .args(["commit", "-m", "initial"])
+            .output()
+            .unwrap();
+
+        // Modify file to make repo dirty
+        fs::write(&file_path, "modified content").unwrap();
+
+        let result = git_status(workspace_path).await;
+        assert!(result.is_ok());
+
+        let json = result.unwrap();
+        assert!(!json["is_clean"].as_bool().unwrap());
+        assert!(json["change_count"].as_i64().unwrap() > 0);
+    }
+
+    #[tokio::test]
+    async fn test_git_clone_success() {
+        let dir = tempdir().unwrap();
+        let target_path = dir.path().join("cloned-repo");
+        let target_path_str = target_path.to_str().unwrap().to_string();
+
+        // Clone a small public repo
+        let result = git_clone(
+            "https://github.com/octocat/Hello-World.git".to_string(),
+            target_path_str.clone(),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(target_path.join(".git").exists());
+    }
+
+    #[tokio::test]
+    async fn test_git_clone_invalid_url() {
+        let dir = tempdir().unwrap();
+        let target_path = dir.path().join("cloned-repo");
+        let target_path_str = target_path.to_str().unwrap().to_string();
+
+        let result = git_clone(
+            "https://github.com/nonexistent-user-12345/nonexistent-repo-67890.git".to_string(),
+            target_path_str,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_git_push_no_remote() {
+        let dir = tempdir().unwrap();
+        let workspace_path = dir.path().to_str().unwrap().to_string();
+
+        // Initialize repo
+        git_init(workspace_path.clone()).await.unwrap();
+
+        // Try to push without remote (should fail)
+        let result = git_push(
+            workspace_path,
+            "origin".to_string(),
+            "main".to_string(),
+            false,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    // ========================================================================
+    // Crawl4AI Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_crawl_url_success() {
+        let result = crawl_url("https://example.com".to_string(), true).await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["url"], "https://example.com");
+        assert_eq!(json["status_code"], 200);
+        assert!(json["title"].as_str().is_some());
+        assert!(json["duration_ms"].as_u64().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_crawl_url_without_markdown() {
+        let result = crawl_url("https://example.com".to_string(), false).await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["url"], "https://example.com");
+        assert_eq!(json["status_code"], 200);
+    }
+
+    #[tokio::test]
+    async fn test_crawl_url_invalid() {
+        let result = crawl_url("https://this-domain-definitely-does-not-exist-12345.com".to_string(), true).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_research_docs_success() {
+        let urls = vec![
+            "https://example.com".to_string(),
+            "https://example.org".to_string(),
+        ];
+
+        let result = research_docs(urls).await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["total_urls"], 2);
+        assert!(json["success_count"].as_i64().unwrap() > 0);
+        assert!(json["documents"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_research_docs_empty() {
+        let urls: Vec<String> = vec![];
+
+        let result = research_docs(urls).await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["total_urls"], 0);
+        assert_eq!(json["success_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_research_docs_with_errors() {
+        let urls = vec![
+            "https://example.com".to_string(),
+            "https://this-domain-definitely-does-not-exist-12345.com".to_string(),
+        ];
+
+        let result = research_docs(urls).await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["total_urls"], 2);
+        // At least one should succeed (example.com)
+        assert!(json["success_count"].as_i64().unwrap() >= 1);
+        // At least one should fail
+        assert!(json["error_count"].as_i64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn test_extract_content_css_success() {
+        let schema = serde_json::json!({
+            "baseSelector": "body",
+            "fields": [
+                {"name": "heading", "selector": "h1", "type": "text"}
+            ]
+        });
+
+        let result = extract_content(
+            "https://example.com".to_string(),
+            "css".to_string(),
+            schema,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["url"], "https://example.com");
+        assert!(json["extracted"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_extract_content_xpath_success() {
+        let schema = serde_json::json!({
+            "baseSelector": "//body",
+            "fields": [
+                {"name": "heading", "selector": "h1", "type": "text"}
+            ]
+        });
+
+        let result = extract_content(
+            "https://example.com".to_string(),
+            "xpath".to_string(),
+            schema,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        let json = result.unwrap();
+        assert_eq!(json["url"], "https://example.com");
+        assert!(json["extracted"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_extract_content_invalid_strategy() {
+        let schema = serde_json::json!({
+            "baseSelector": "body",
+            "fields": []
+        });
+
+        let result = extract_content(
+            "https://example.com".to_string(),
+            "invalid_strategy".to_string(),
+            schema,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown strategy type"));
+    }
+
+    #[tokio::test]
+    async fn test_extract_content_invalid_url() {
+        let schema = serde_json::json!({
+            "baseSelector": "body",
+            "fields": []
+        });
+
+        let result = extract_content(
+            "https://this-domain-definitely-does-not-exist-12345.com".to_string(),
+            "css".to_string(),
+            schema,
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
 }

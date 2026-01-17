@@ -75,4 +75,8 @@ tauri-plugin-single-instance = "2.3.7"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-cli = "2.4.1"
 tauri-plugin-updater = "2.9.0"
+cerebras-rs = "0.0.2"
+
+[dev-dependencies]
+tempfile = "3.24.0"
 

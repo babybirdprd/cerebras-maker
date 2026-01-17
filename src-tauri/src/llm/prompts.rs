@@ -143,6 +143,12 @@ impl SystemPrompts {
         include_str!("../../prompts/atom_grits.md")
     }
 
+    /// RLM Processor atom prompt
+    /// Based on: "Recursive Language Models: Scaling Context with Recursive Prompt Decomposition"
+    pub fn atom_rlm_processor() -> &'static str {
+        include_str!("../../prompts/atom_rlm_processor.md")
+    }
+
     /// L3 Context Engineer prompt
     pub fn context_engineer() -> &'static str {
         include_str!("../../prompts/context_engineer.md")
@@ -156,6 +162,7 @@ impl SystemPrompts {
             "Reviewer" => Self::atom_reviewer(),
             "Tester" => Self::atom_tester(),
             "GritsAnalyzer" => Self::atom_grits(),
+            "RLMProcessor" => Self::atom_rlm_processor(),
             "Architect" => Self::architect(),
             _ => Self::atom_coder(), // Default to coder
         }

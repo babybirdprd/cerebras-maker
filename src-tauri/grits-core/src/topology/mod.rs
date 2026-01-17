@@ -57,6 +57,8 @@ impl SymbolGraph {
 }
 
 pub mod analysis;
+pub mod layers;
+pub mod virtual_apply;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod parser;

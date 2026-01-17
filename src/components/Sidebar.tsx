@@ -1,21 +1,28 @@
 import React from 'react';
-import { LayoutDashboard, Network, History, Settings, Terminal, ShieldCheck } from 'lucide-react';
+import { LayoutDashboard, Network, History, Settings, Terminal, ShieldCheck, Home, MessageSquare, Shield, FileCheck, FolderOpen, Loader2, CheckCircle, AlertCircle, Zap } from 'lucide-react';
 
 interface SidebarProps {
   currentView: string;
   onChangeView: (view: string) => void;
   onOpenSettings: () => void;
+  autoSaveStatus?: 'idle' | 'saving' | 'saved' | 'error';
+  currentSessionId?: string | null;
   className?: string;
 }
 
 const navItems = [
+  { id: 'upload', label: 'New Project', icon: Home },
+  { id: 'sessions', label: 'Sessions', icon: FolderOpen },
+  { id: 'interrogation', label: 'Chat', icon: MessageSquare },
   { id: 'dashboard', label: 'Blueprint', icon: LayoutDashboard },
   { id: 'topology', label: 'Topology', icon: Network },
   { id: 'execution', label: 'Swarm', icon: Terminal },
+  { id: 'validation', label: 'Validation', icon: Shield },
+  { id: 'tests', label: 'Tests', icon: FileCheck },
   { id: 'history', label: 'Shadow Git', icon: History },
 ];
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onOpenSettings, className = '' }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onOpenSettings, autoSaveStatus = 'idle', currentSessionId = null, className = '' }) => {
   return (
     <div className={`w-64 h-full bg-zinc-950 border-r border-zinc-800 flex flex-col justify-between ${className}`}>
       <div>
@@ -48,6 +55,44 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onO
       </div>
 
       <div className="p-4 border-t border-zinc-800">
+        {/* Auto-save Status */}
+        {currentSessionId && (
+          <div className="bg-zinc-900 rounded-lg p-3 border border-zinc-800 mb-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Zap size={14} className="text-amber-400" />
+                <span className="text-xs text-zinc-400 font-mono uppercase">Auto-save</span>
+              </div>
+              <div className="flex items-center gap-1">
+                {autoSaveStatus === 'saving' && (
+                  <>
+                    <Loader2 size={12} className="animate-spin text-amber-400" />
+                    <span className="text-[10px] text-amber-400">Saving</span>
+                  </>
+                )}
+                {autoSaveStatus === 'saved' && (
+                  <>
+                    <CheckCircle size={12} className="text-emerald-400" />
+                    <span className="text-[10px] text-emerald-400">Saved</span>
+                  </>
+                )}
+                {autoSaveStatus === 'error' && (
+                  <>
+                    <AlertCircle size={12} className="text-red-400" />
+                    <span className="text-[10px] text-red-400">Error</span>
+                  </>
+                )}
+                {autoSaveStatus === 'idle' && (
+                  <>
+                    <CheckCircle size={12} className="text-zinc-500" />
+                    <span className="text-[10px] text-zinc-500">Ready</span>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
         <div className="bg-zinc-900 rounded-lg p-3 border border-zinc-800 mb-2">
             <div className="flex items-center justify-between mb-2">
                 <span className="text-xs text-zinc-400 font-mono uppercase">Reliability</span>
@@ -61,7 +106,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onO
                 <span className="text-[10px] text-emerald-400 font-mono">100% Solid</span>
             </div>
         </div>
-        <button 
+        <button
           onClick={onOpenSettings}
           className="flex items-center gap-3 px-3 py-2 text-zinc-400 hover:text-white w-full text-sm"
         >

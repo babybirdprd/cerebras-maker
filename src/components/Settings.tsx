@@ -1,8 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { X, Save, RotateCcw, Key, Cpu, Loader2, ChevronDown, Check, Link as LinkIcon, Zap, Sparkles, Bot, Code, Eye, TestTube, Thermometer } from 'lucide-react';
+import { X, Save, RotateCcw, Key, Cpu, Loader2, ChevronDown, Check, Link as LinkIcon, Zap, Sparkles, Bot, Code, Eye, TestTube, Thermometer, RefreshCw, Layers, Hash, FileText } from 'lucide-react';
 import { DEFAULT_AGENT_CONFIG } from '../constants';
 import { AgentConfig, ProviderConfig } from '../types';
 import { saveSettings, loadSettings, ApiKeys } from '../hooks/useTauri';
+import { RLMConfig } from '../store/makerStore';
 
 interface SettingsProps {
   isOpen: boolean;
@@ -253,7 +254,15 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>('openai');
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<'providers' | 'agents'>('providers');
+  const [activeTab, setActiveTab] = useState<'providers' | 'agents' | 'rlm'>('providers');
+  const [rlmConfig, setRlmConfig] = useState<RLMConfig>({
+    max_depth: 3,
+    max_iterations: 10,
+    context_threshold: 50000,
+    sub_model_provider: 'cerebras',
+    sub_model_name: 'qwen-3-235b-a22b-instruct-2507',
+    sub_model_temperature: 0.1,
+  });
 
   useEffect(() => {
     if (isOpen) {
@@ -350,6 +359,17 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             }`}
           >
             Agent Configuration
+          </button>
+          <button
+            onClick={() => setActiveTab('rlm')}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
+              activeTab === 'rlm'
+                ? 'border-violet-400 text-violet-400'
+                : 'border-transparent text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <RefreshCw size={14} />
+            RLM Settings
           </button>
         </div>
 
@@ -475,7 +495,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                 </div>
               </div>
             </div>
-          ) : (
+          ) : activeTab === 'agents' ? (
             <div className="p-6 space-y-3">
               <p className="text-sm text-zinc-400 mb-4">
                 Configure which provider and model each agent should use. Each agent can use a different provider.
@@ -483,6 +503,154 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
               {(Object.keys(AGENT_LABELS) as Array<keyof AgentConfig>).map(key => (
                 <AgentConfigRow key={key} agentKey={key} config={config[key]} onChange={handleAgentChange} />
               ))}
+            </div>
+          ) : (
+            /* RLM Configuration Tab */
+            <div className="p-6 space-y-6">
+              <div className="flex items-center gap-3 mb-6">
+                <div className="p-3 bg-violet-500/20 rounded-xl border border-violet-500/30">
+                  <RefreshCw size={24} className="text-violet-400" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-white">Recursive Language Model</h3>
+                  <p className="text-sm text-zinc-400">Configure RLM for handling large contexts via recursive decomposition</p>
+                </div>
+              </div>
+
+              {/* Context Threshold */}
+              <div className="bg-zinc-900/50 rounded-2xl border border-zinc-800/50 p-6 space-y-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <FileText size={16} className="text-violet-400" />
+                  <h4 className="text-sm font-semibold text-white">Context Threshold</h4>
+                </div>
+                <p className="text-xs text-zinc-500 mb-3">
+                  When context exceeds this character count, RLM mode activates for recursive processing.
+                </p>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min="10000"
+                    max="200000"
+                    step="5000"
+                    value={rlmConfig.context_threshold}
+                    onChange={(e) => setRlmConfig(prev => ({ ...prev, context_threshold: parseInt(e.target.value) }))}
+                    className="flex-1 h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-violet-500"
+                  />
+                  <div className="flex items-center gap-2 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2">
+                    <Hash size={14} className="text-zinc-500" />
+                    <input
+                      type="number"
+                      value={rlmConfig.context_threshold}
+                      onChange={(e) => setRlmConfig(prev => ({ ...prev, context_threshold: parseInt(e.target.value) || 50000 }))}
+                      className="w-20 bg-transparent text-sm text-white focus:outline-none text-center"
+                    />
+                    <span className="text-xs text-zinc-500">chars</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Recursion Limits */}
+              <div className="bg-zinc-900/50 rounded-2xl border border-zinc-800/50 p-6 space-y-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Layers size={16} className="text-violet-400" />
+                  <h4 className="text-sm font-semibold text-white">Recursion Limits</h4>
+                </div>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Max Depth</label>
+                    <p className="text-[10px] text-zinc-600 mb-2">How deep nested sub-queries can go</p>
+                    <input
+                      type="number"
+                      min="1"
+                      max="10"
+                      value={rlmConfig.max_depth}
+                      onChange={(e) => setRlmConfig(prev => ({ ...prev, max_depth: parseInt(e.target.value) || 3 }))}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Max Iterations</label>
+                    <p className="text-[10px] text-zinc-600 mb-2">Maximum REPL loop iterations</p>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={rlmConfig.max_iterations}
+                      onChange={(e) => setRlmConfig(prev => ({ ...prev, max_iterations: parseInt(e.target.value) || 10 }))}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Sub-Model Configuration */}
+              <div className="bg-zinc-900/50 rounded-2xl border border-zinc-800/50 p-6 space-y-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <Bot size={16} className="text-violet-400" />
+                  <h4 className="text-sm font-semibold text-white">Sub-Model for Recursive Queries</h4>
+                </div>
+                <p className="text-xs text-zinc-500 mb-3">
+                  Model used for llm_query() sub-calls. Use a fast, cost-effective model for best results.
+                </p>
+                <div className="grid grid-cols-3 gap-4">
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Provider</label>
+                    <select
+                      value={rlmConfig.sub_model_provider}
+                      onChange={(e) => {
+                        const newProvider = e.target.value;
+                        const newModels = MODELS[newProvider] || [];
+                        setRlmConfig(prev => ({
+                          ...prev,
+                          sub_model_provider: newProvider,
+                          sub_model_name: newModels[0] || prev.sub_model_name
+                        }));
+                      }}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
+                    >
+                      {PROVIDERS.map(p => (
+                        <option key={p} value={p}>{PROVIDERS_CONFIG[p].name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Model</label>
+                    <select
+                      value={rlmConfig.sub_model_name}
+                      onChange={(e) => setRlmConfig(prev => ({ ...prev, sub_model_name: e.target.value }))}
+                      className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
+                    >
+                      {(MODELS[rlmConfig.sub_model_provider] || []).map(m => (
+                        <option key={m} value={m}>{m}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-zinc-400 mb-2">Temperature</label>
+                    <div className="flex items-center gap-2 bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2">
+                      <Thermometer size={14} className="text-zinc-500" />
+                      <input
+                        type="number"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        value={rlmConfig.sub_model_temperature}
+                        onChange={(e) => setRlmConfig(prev => ({ ...prev, sub_model_temperature: parseFloat(e.target.value) || 0.1 }))}
+                        className="w-full bg-transparent text-sm text-white focus:outline-none"
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Info Box */}
+              <div className="bg-violet-500/10 border border-violet-500/30 rounded-xl p-4">
+                <p className="text-xs text-violet-300">
+                  <strong>RLM Mode:</strong> When context exceeds the threshold, the system treats the prompt as an external
+                  environment variable. The LLM can peek at slices, chunk content, filter with regex, and make recursive
+                  sub-queries to process arbitrarily large contexts efficiently.
+                </p>
+              </div>
             </div>
           )}
         </div>

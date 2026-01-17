@@ -56,11 +56,22 @@ export async function analyzePrd(content: string, filename: string): Promise<PRD
   return await invoke<PRDAnalysisResult>('analyze_prd', { content, filename });
 }
 
+// P2-1: Conversation message type for history tracking
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export async function sendInterrogationMessage(
-  message: string, 
-  context: Record<string, unknown>
+  message: string,
+  context: Record<string, unknown>,
+  conversationHistory?: ConversationMessage[]
 ): Promise<InterrogationResponse> {
-  return await invoke<InterrogationResponse>('send_interrogation_message', { message, context });
+  return await invoke<InterrogationResponse>('send_interrogation_message', {
+    message,
+    context,
+    conversationHistory: conversationHistory ?? null
+  });
 }
 
 export async function completeInterrogation(
@@ -143,15 +154,30 @@ export async function initRuntime(workspacePath: string): Promise<string> {
 // Grits Commands
 // ============================================================================
 
-export async function checkRedFlags(previousBetti1: number): Promise<{
+// P3-1: Layer violation type matching Rust LayerViolation struct (analysis.rs:758)
+export interface LayerViolation {
+  from_node: string;
+  from_layer: string;
+  to_node: string;
+  to_layer: string;
+  violation_type: string; // "upstream_dependency", "cycle", etc.
+}
+
+// P3-1: Updated to match Rust RedFlagResult struct
+export interface RedFlagResult {
   introduced_cycle: boolean;
+  has_layer_violations: boolean;
   betti_1: number;
   betti_0: number;
   triangle_count: number;
   solid_score: number;
   cycles_detected: string[][];
-}> {
-  return await invoke('check_red_flags', { previousBetti1 });
+  layer_violations: LayerViolation[];
+  layer_config_loaded: boolean;
+}
+
+export async function checkRedFlags(previousBetti1: number): Promise<RedFlagResult> {
+  return await invoke<RedFlagResult>('check_red_flags', { previousBetti1 });
 }
 
 export async function analyzeTopology(): Promise<unknown> {
@@ -168,6 +194,101 @@ export async function executeScript(script: string): Promise<unknown> {
 
 export async function getExecutionLog(): Promise<unknown[]> {
   return await invoke('get_execution_log');
+}
+
+// ============================================================================
+// Execution Metrics Commands
+// ============================================================================
+
+export interface ExecutionMetrics {
+  active_atoms: number;
+  total_atoms_spawned: number;
+  total_tokens: number;
+  tokens_per_second: number;
+  red_flag_count: number;
+  shadow_commits: number;
+  last_updated_ms: number;
+}
+
+export async function getExecutionMetrics(): Promise<ExecutionMetrics> {
+  return await invoke<ExecutionMetrics>('get_execution_metrics');
+}
+
+export async function updateExecutionMetrics(
+  activeAtoms?: number,
+  tokensAdded?: number,
+  redFlagsAdded?: number
+): Promise<void> {
+  await invoke('update_execution_metrics', {
+    active_atoms: activeAtoms,
+    tokens_added: tokensAdded,
+    red_flags_added: redFlagsAdded,
+  });
+}
+
+export async function recordAtomSpawned(): Promise<void> {
+  await invoke('record_atom_spawned');
+}
+
+export async function recordAtomCompleted(tokensUsed: number, hadRedFlag: boolean): Promise<void> {
+  await invoke('record_atom_completed', { tokensUsed, hadRedFlag });
+}
+
+export async function recordShadowCommit(): Promise<void> {
+  await invoke('record_shadow_commit');
+}
+
+export async function resetExecutionMetrics(): Promise<void> {
+  await invoke('reset_execution_metrics');
+}
+
+// ============================================================================
+// Voting State Commands
+// ============================================================================
+
+export interface VotingCandidate {
+  id: number;
+  snippet: string;
+  score: number;
+  red_flags: string[];
+  status: string; // "pending", "accepted", "rejected"
+  votes: number;
+}
+
+export interface VotingState {
+  task_id: string;
+  task_description: string;
+  candidates: VotingCandidate[];
+  is_voting: boolean;
+  winner_id: number | null;
+}
+
+export async function getVotingState(): Promise<VotingState> {
+  return await invoke<VotingState>('get_voting_state');
+}
+
+export async function startVoting(taskId: string, taskDescription: string): Promise<void> {
+  await invoke('start_voting', { taskId, taskDescription });
+}
+
+export async function addVotingCandidate(
+  snippet: string,
+  score: number,
+  redFlags: string[]
+): Promise<number> {
+  return await invoke<number>('add_voting_candidate', { snippet, score, redFlags });
+}
+
+export async function recordVote(candidateId: number): Promise<void> {
+  await invoke('record_vote', { candidateId });
+}
+
+export async function completeVoting(winnerId: number): Promise<void> {
+  await invoke('complete_voting', { winnerId });
+}
+
+export async function clearVotingState(): Promise<void> {
+  await invoke('clear_voting_state');
 }
 
 // ============================================================================
@@ -349,6 +470,17 @@ export interface MiniCodebase {
   };
 }
 
+// P3-1: RLM context info for large context handling
+export interface RLMContextInfo {
+  total_length: number;
+  context_type: string;
+  use_rlm: boolean;
+  suggested_chunk_size: number;
+  estimated_chunks: number;
+  full_context: string;
+  context_var_name: string;
+}
+
 export interface ContextPackage {
   task_id: string;
   atom_type: string;
@@ -357,6 +489,7 @@ export interface ContextPackage {
   markdown: string;
   constraints: string[];
   metrics: ContextMetrics;
+  rlm_info?: RLMContextInfo; // P3-1: Added missing optional field
 }
 
 /**
@@ -510,4 +643,491 @@ export async function parseReviewerOutput(rawOutput: string): Promise<ReviewResu
  */
 export async function getAtomTypes(): Promise<AtomTypeInfo[]> {
   return await invoke<AtomTypeInfo[]>('get_atom_types');
+}
+
+// ============================================================================
+// Crawl4AI Commands - Web Crawling & Research
+// ============================================================================
+
+export interface CrawlResult {
+  url: string;
+  status_code: number;
+  title: string | null;
+  markdown: string | null;
+  cleaned_content: string | null;
+  duration_ms: number;
+}
+
+export interface ResearchResult {
+  documents: Array<{
+    url: string;
+    title: string | null;
+    markdown: string | null;
+    status_code: number;
+  }>;
+  errors: Array<{
+    url: string;
+    error: string;
+  }>;
+  total_urls: number;
+  success_count: number;
+  error_count: number;
+}
+
+export interface ExtractionResult {
+  url: string;
+  title: string | null;
+  extracted: unknown[];
+  count: number;
+}
+
+/**
+ * Crawl a single URL and return content as markdown
+ */
+export async function crawlUrl(url: string, convertToMarkdown = true): Promise<CrawlResult> {
+  return await invoke<CrawlResult>('crawl_url', { url, convertToMarkdown });
+}
+
+/**
+ * Research multiple documentation URLs in parallel
+ * Useful for gathering context from external APIs, libraries, etc.
+ */
+export async function researchDocs(urls: string[]): Promise<ResearchResult> {
+  return await invoke<ResearchResult>('research_docs', { urls });
+}
+
+/**
+ * Extract structured content from a URL using CSS or XPath selectors
+ * @param url - The URL to crawl
+ * @param strategyType - 'css' or 'xpath'
+ * @param schema - Extraction schema with baseSelector and fields
+ */
+export async function extractContent(
+  url: string,
+  strategyType: 'css' | 'xpath',
+  schema: Record<string, unknown>
+): Promise<ExtractionResult> {
+  return await invoke<ExtractionResult>('extract_content', { url, strategyType, schema });
+}
+
+// ============================================================================
+// GitHub Integration Hooks
+// ============================================================================
+
+export interface GitRemote {
+  name: string;
+  url: string;
+  type: string;
+}
+
+export interface GitChange {
+  status: string;
+  file: string;
+}
+
+export interface GitStatus {
+  is_clean: boolean;
+  changes: GitChange[];
+  change_count: number;
+}
+
+export async function gitInit(workspacePath: string): Promise<string> {
+  return await invoke<string>('git_init', { workspacePath });
+}
+
+export async function gitAddRemote(workspacePath: string, name: string, url: string): Promise<string> {
+  return await invoke<string>('git_add_remote', { workspacePath, name, url });
+}
+
+export async function gitGetRemotes(workspacePath: string): Promise<{ remotes: GitRemote[] }> {
+  return await invoke<{ remotes: GitRemote[] }>('git_get_remotes', { workspacePath });
+}
+
+export async function gitPush(
+  workspacePath: string,
+  remote: string,
+  branch: string,
+  setUpstream: boolean = false
+): Promise<string> {
+  return await invoke<string>('git_push', { workspacePath, remote, branch, setUpstream });
+}
+
+export async function gitCurrentBranch(workspacePath: string): Promise<string> {
+  return await invoke<string>('git_current_branch', { workspacePath });
+}
+
+export async function gitStatus(workspacePath: string): Promise<GitStatus> {
+  return await invoke<GitStatus>('git_status', { workspacePath });
+}
+
+export async function gitClone(url: string, targetPath: string): Promise<string> {
+  return await invoke<string>('git_clone', { url, targetPath });
+}
+
+export async function gitAdd(workspacePath: string, paths: string[]): Promise<string> {
+  return await invoke<string>('git_add', { workspacePath, paths });
+}
+
+export interface GitCommitResult {
+  success: boolean;
+  commit_hash?: string;
+  message: string;
+}
+
+export async function gitCommit(workspacePath: string, message: string): Promise<GitCommitResult> {
+  return await invoke<GitCommitResult>('git_commit', { workspacePath, message });
+}
+
+export async function gitBranch(workspacePath: string, branchName: string, create: boolean = false): Promise<string> {
+  return await invoke<string>('git_branch', { workspacePath, branchName, create });
+}
+
+export interface GitBranch {
+  name: string;
+  commit: string;
+  upstream: string;
+}
+
+export interface GitBranchList {
+  branches: GitBranch[];
+  current: string;
+}
+
+export async function gitListBranches(workspacePath: string): Promise<GitBranchList> {
+  return await invoke<GitBranchList>('git_list_branches', { workspacePath });
+}
+
+export async function gitPull(workspacePath: string, remote: string, branch: string, rebase: boolean = false): Promise<string> {
+  return await invoke<string>('git_pull', { workspacePath, remote, branch, rebase });
+}
+
+export async function gitDiff(workspacePath: string, staged: boolean = false, filePath?: string): Promise<string> {
+  return await invoke<string>('git_diff', { workspacePath, staged, filePath });
+}
+
+export interface GitCommit {
+  hash: string;
+  message: string;
+  author: string;
+  email: string;
+  date: string;
+}
+
+export interface GitLogResult {
+  commits: GitCommit[];
+}
+
+export async function gitLog(workspacePath: string, count?: number): Promise<GitLogResult> {
+  return await invoke<GitLogResult>('git_log', { workspacePath, count });
+}
+
+// ============================================================================
+// GitHub Actions & Deployment Commands
+// ============================================================================
+
+export interface WorkflowConfig {
+  project_type: string;
+  node_version?: string;
+  rust_version?: string;
+  deploy_target?: string;
+  run_tests: boolean;
+  run_lint: boolean;
+}
+
+export interface WorkflowResult {
+  success: boolean;
+  path: string;
+  content: string;
+}
+
+export async function generateGithubWorkflow(workspacePath: string, config: WorkflowConfig): Promise<WorkflowResult> {
+  return await invoke<WorkflowResult>('generate_github_workflow', { workspacePath, config });
+}
+
+export interface DeployConfigResult {
+  success: boolean;
+  platform: string;
+  path: string;
+  content: string;
+}
+
+export async function generateDeployConfig(workspacePath: string, platform: string): Promise<DeployConfigResult> {
+  return await invoke<DeployConfigResult>('generate_deploy_config', { workspacePath, platform });
+}
+
+// ============================================================================
+// Multi-file Edit Validation Commands
+// ============================================================================
+
+export interface MultiFileEdit {
+  file_path: string;
+  operation: 'create' | 'modify' | 'delete';
+  content?: string;
+  language?: string;
+}
+
+export interface LayerViolation {
+  from_symbol: string;
+  from_layer: string;
+  to_symbol: string;
+  to_layer: string;
+  message: string;
+}
+
+export interface MultiFileValidationResult {
+  is_safe: boolean;
+  original_betti_1: number;
+  new_betti_1: number;
+  introduces_cycles: boolean;
+  layer_violations: LayerViolation[];
+  new_symbols: string[];
+  new_dependencies: [string, string, string][];
+  warnings: string[];
+  errors: string[];
+  files_analyzed: number;
+  cross_file_issues: string[];
+}
+
+export interface EditImpactPreview {
+  new_symbols: string[];
+  new_dependencies: [string, string, string][];
+  files_affected: number;
+}
+
+export async function validateMultiFileEdit(
+  workspacePath: string,
+  edits: MultiFileEdit[]
+): Promise<MultiFileValidationResult> {
+  return await invoke<MultiFileValidationResult>('validate_multi_file_edit', { workspacePath, edits });
+}
+
+export async function previewEditImpact(edits: MultiFileEdit[]): Promise<EditImpactPreview> {
+  return await invoke<EditImpactPreview>('preview_edit_impact', { edits });
+}
+
+// ============================================================================
+// Test Generation & Execution Commands
+// ============================================================================
+
+export interface TestFrameworkInfo {
+  framework: string;
+  test_command: string;
+  test_pattern: string;
+  config_file: string | null;
+}
+
+export interface FailedTest {
+  name: string;
+  file: string | null;
+  error: string;
+}
+
+export interface TestExecutionResult {
+  success: boolean;
+  total_tests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration_ms: number;
+  output: string;
+  failed_tests: FailedTest[];
+}
+
+export interface GeneratedTest {
+  test_code: string;
+  suggested_file: string;
+  source_file: string;
+  language: string;
+  test_type: string;
+}
+
+export async function detectTestFramework(workspacePath: string): Promise<TestFrameworkInfo> {
+  return await invoke<TestFrameworkInfo>('detect_test_framework', { workspacePath });
+}
+
+export async function runTests(
+  workspacePath: string,
+  testPattern?: string,
+  timeoutSeconds?: number
+): Promise<TestExecutionResult> {
+  return await invoke<TestExecutionResult>('run_tests', {
+    workspacePath,
+    testPattern: testPattern ?? null,
+    timeoutSeconds: timeoutSeconds ?? null
+  });
+}
+
+export async function generateTests(
+  workspacePath: string,
+  sourceFile: string,
+  testType?: 'unit' | 'integration' | 'property'
+): Promise<GeneratedTest> {
+  return await invoke<GeneratedTest>('generate_tests', {
+    workspacePath,
+    sourceFile,
+    testType: testType ?? null
+  });
+}
+
+// ============================================================================
+// Knowledge Base Commands
+// ============================================================================
+
+export interface KnowledgeDocument {
+  id: string;
+  name: string;
+  content: string;
+  doc_type: string;
+  metadata: Record<string, string>;
+  auto_classified?: boolean;
+  word_count?: number;
+}
+
+export interface AutoClassifyResult {
+  id: string;
+  doc_type: string;
+  auto_classified: boolean;
+}
+
+export interface KnowledgeBaseStats {
+  document_count: number;
+  web_research_count: number;
+  total_tokens: number;
+  documents_by_type: Record<string, number>;
+}
+
+export interface WebResearchItem {
+  id: string;
+  url: string;
+  title: string;
+  content: string;
+  crawled_at: string;
+}
+
+export async function kbAddDocument(name: string, content: string, docType: string): Promise<string> {
+  return await invoke<string>('kb_add_document', { name, content, docType });
+}
+
+/** Add document with auto-classification based on content */
+export async function kbAddDocumentAuto(name: string, content: string): Promise<AutoClassifyResult> {
+  return await invoke<AutoClassifyResult>('kb_add_document_auto', { name, content });
+}
+
+/** Classify document content without adding it to KB */
+export async function kbClassifyDocument(content: string, filename: string): Promise<string> {
+  return await invoke<string>('kb_classify_document', { content, filename });
+}
+
+export async function kbAddWebResearch(url: string, title: string, content: string): Promise<string> {
+  return await invoke<string>('kb_add_web_research', { url, title, content });
+}
+
+export async function kbRemoveDocument(id: string): Promise<void> {
+  return await invoke<void>('kb_remove_document', { id });
+}
+
+export async function kbGetDocuments(): Promise<KnowledgeDocument[]> {
+  return await invoke<KnowledgeDocument[]>('kb_get_documents');
+}
+
+export async function kbCompileContext(): Promise<string> {
+  return await invoke<string>('kb_compile_context');
+}
+
+/** Compile context with token budget limit */
+export async function kbCompileContextWithBudget(maxTokens: number): Promise<string> {
+  return await invoke<string>('kb_compile_context_with_budget', { maxTokens });
+}
+
+/** Compile context optimized for L1 Interrogator */
+export async function kbCompileForInterrogator(): Promise<string> {
+  return await invoke<string>('kb_compile_for_interrogator');
+}
+
+/** Get knowledge base statistics */
+export async function kbGetStats(): Promise<KnowledgeBaseStats> {
+  return await invoke<KnowledgeBaseStats>('kb_get_stats');
+}
+
+// ============================================================================
+// Session Persistence Commands
+// ============================================================================
+
+export interface SessionData {
+  id: string;
+  name: string;
+  workspace_path: string;
+  prd_content: string | null;
+  prd_filename: string | null;
+  conversation_history: unknown[];
+  plan_content: string | null;
+  kb_documents: unknown[];
+  current_view: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+}
+
+export interface SessionSummary {
+  id: string;
+  name: string;
+  workspace_path: string;
+  created_at_ms: number;
+  updated_at_ms: number;
+  has_prd: boolean;
+  has_plan: boolean;
+  message_count: number;
+  kb_document_count: number;
+}
+
+/** Save current session state */
+export async function saveSession(
+  sessionName: string,
+  workspacePath: string,
+  prdContent: string | null,
+  prdFilename: string | null,
+  conversationHistory: unknown[],
+  planContent: string | null,
+  currentView: string
+): Promise<SessionData> {
+  return await invoke<SessionData>('save_session', {
+    sessionName,
+    workspacePath,
+    prdContent,
+    prdFilename,
+    conversationHistory,
+    planContent,
+    currentView,
+  });
+}
+
+/** Update an existing session */
+export async function updateSession(
+  sessionId: string,
+  prdContent: string | null,
+  conversationHistory: unknown[],
+  planContent: string | null,
+  currentView: string
+): Promise<SessionData> {
+  return await invoke<SessionData>('update_session', {
+    sessionId,
+    prdContent,
+    conversationHistory,
+    planContent,
+    currentView,
+  });
+}
+
+/** Load a session by ID */
+export async function loadSession(sessionId: string): Promise<SessionData> {
+  return await invoke<SessionData>('load_session', { sessionId });
+}
+
+/** List all saved sessions */
+export async function listSessions(): Promise<SessionSummary[]> {
+  return await invoke<SessionSummary[]>('list_sessions');
+}
+
+/** Delete a session by ID */
+export async function deleteSession(sessionId: string): Promise<void> {
+  await invoke('delete_session', { sessionId });
 }

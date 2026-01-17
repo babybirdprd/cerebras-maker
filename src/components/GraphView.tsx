@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
+import { Share2 } from 'lucide-react';
 import { GraphNode, GraphLink } from '../types';
 
 interface GraphViewProps {
@@ -122,6 +123,8 @@ const GraphView: React.FC<GraphViewProps> = ({ nodes, links }) => {
     };
   }, [nodes, links, dimensions]);
 
+  const hasData = nodes.length > 0;
+
   return (
     <div ref={containerRef} className="w-full h-full bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800 relative">
         <div className="absolute top-4 left-4 z-10 bg-zinc-900/80 p-2 rounded backdrop-blur-sm border border-zinc-700 pointer-events-none">
@@ -133,7 +136,17 @@ const GraphView: React.FC<GraphViewProps> = ({ nodes, links }) => {
                 <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500"></span> Ext</span>
             </div>
         </div>
-      <svg ref={svgRef} className="w-full h-full"></svg>
+      {hasData ? (
+        <svg ref={svgRef} className="w-full h-full"></svg>
+      ) : (
+        <div className="flex flex-col items-center justify-center h-full text-zinc-500">
+          <Share2 size={48} className="mb-4 opacity-30" />
+          <p className="text-sm font-medium">No topology data</p>
+          <p className="text-xs mt-1 text-zinc-600">
+            Load a symbol graph to visualize dependencies
+          </p>
+        </div>
+      )}
     </div>
   );
 };

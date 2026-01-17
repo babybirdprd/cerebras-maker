@@ -1,5 +1,6 @@
 // Cerebras-MAKER: Shadow Git - Transactional File System
 // PRD Section 5: Reliability Layer - The Shadow Git
+// Uses native gitoxide (gix) for read operations, with fallback for complex writes
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
@@ -90,13 +91,13 @@ impl ShadowGit {
     }
 
     /// Stage all changes in the workspace
+    /// Uses git command for reliable cross-platform staging
     fn stage_all(&self) -> Result<()> {
-        // Use git command as fallback since gix staging is complex
         let output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
             .args(["add", "-A"])
             .output()?;
-        
+
         if !output.status.success() {
             return Err(anyhow!("Failed to stage changes"));
         }
@@ -115,12 +116,19 @@ impl ShadowGit {
             return Err(anyhow!("Failed to create commit: {}", stderr));
         }
 
-        // Get the commit hash
+        // Get the commit hash using gix for efficiency
+        if let Some(ref repo) = self.repo {
+            if let Ok(head) = repo.head_commit() {
+                return Ok(head.id().to_string());
+            }
+        }
+
+        // Fallback to git command
         let hash_output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
             .args(["rev-parse", "HEAD"])
             .output()?;
-        
+
         Ok(String::from_utf8_lossy(&hash_output.stdout).trim().to_string())
     }
 
@@ -136,14 +144,7 @@ impl ShadowGit {
         let prev_snapshot = &self.snapshots[prev_idx];
 
         if let Some(ref hash) = prev_snapshot.commit_hash {
-            let output = std::process::Command::new("git")
-                .current_dir(&self.workspace_path)
-                .args(["reset", "--hard", hash])
-                .output()?;
-
-            if !output.status.success() {
-                return Err(anyhow!("Failed to rollback"));
-            }
+            self.reset_hard(hash)?;
         }
 
         // Remove the current snapshot
@@ -161,20 +162,27 @@ impl ShadowGit {
         let snapshot = &self.snapshots[idx];
 
         if let Some(ref hash) = snapshot.commit_hash {
-            let output = std::process::Command::new("git")
-                .current_dir(&self.workspace_path)
-                .args(["reset", "--hard", hash])
-                .output()?;
-
-            if !output.status.success() {
-                return Err(anyhow!("Failed to rollback to snapshot"));
-            }
+            self.reset_hard(hash)?;
         }
 
         // Truncate snapshots after this point
         self.snapshots.truncate(idx + 1);
         self.current_snapshot_idx = Some(idx);
 
+        Ok(())
+    }
+
+    /// Perform a hard reset to a specific commit
+    /// Uses git command for reliable reset with working directory update
+    fn reset_hard(&self, commit_hash: &str) -> Result<()> {
+        let output = std::process::Command::new("git")
+            .current_dir(&self.workspace_path)
+            .args(["reset", "--hard", commit_hash])
+            .output()?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Failed to reset to {}", commit_hash));
+        }
         Ok(())
     }
 
@@ -198,24 +206,20 @@ impl ShadowGit {
         let first_snapshot = &self.snapshots[0];
 
         // Get the parent of the first snapshot
-        let parent_output = std::process::Command::new("git")
-            .current_dir(&self.workspace_path)
-            .args(["rev-parse", &format!("{}^", first_snapshot.commit_hash.as_deref().unwrap_or("HEAD"))])
-            .output()?;
-
-        let parent_hash = if parent_output.status.success() {
-            String::from_utf8_lossy(&parent_output.stdout).trim().to_string()
-        } else {
-            // If no parent, use empty tree
-            "".to_string()
-        };
-
-        // Soft reset to parent
-        if !parent_hash.is_empty() {
-            let _ = std::process::Command::new("git")
+        if let Some(ref hash) = first_snapshot.commit_hash {
+            // Soft reset to parent of first snapshot
+            let parent_output = std::process::Command::new("git")
                 .current_dir(&self.workspace_path)
-                .args(["reset", "--soft", &parent_hash])
+                .args(["rev-parse", &format!("{}^", hash)])
                 .output()?;
+
+            if parent_output.status.success() {
+                let parent_hash = String::from_utf8_lossy(&parent_output.stdout).trim().to_string();
+                let _ = std::process::Command::new("git")
+                    .current_dir(&self.workspace_path)
+                    .args(["reset", "--soft", &parent_hash])
+                    .output()?;
+            }
         }
 
         // Create the squashed commit
@@ -230,7 +234,49 @@ impl ShadowGit {
     }
 
     /// Get the git history for time-travel visualization
+    /// Uses native gix for efficient history traversal
     pub fn get_history(&self, limit: usize) -> Result<Vec<HistoryEntry>> {
+        // Try native gix first for efficiency
+        if let Some(ref repo) = self.repo {
+            if let Ok(head) = repo.head_commit() {
+                let mut entries = Vec::new();
+                let mut current_id = Some(head.id().detach());
+                let mut count = 0;
+
+                while let Some(id) = current_id {
+                    if count >= limit {
+                        break;
+                    }
+
+                    if let Ok(obj) = repo.find_object(id) {
+                        if let Ok(commit) = obj.try_into_commit() {
+                            let message = commit.message_raw()
+                                .map(|m| m.to_string())
+                                .unwrap_or_default();
+                            let first_line = message.lines().next().unwrap_or("").to_string();
+                            let hash_str = id.to_string();
+                            let short_hash = if hash_str.len() >= 7 { &hash_str[..7] } else { &hash_str };
+
+                            entries.push(HistoryEntry {
+                                hash: short_hash.to_string(),
+                                message: first_line,
+                            });
+
+                            current_id = commit.parent_ids().next().map(|p| p.detach());
+                            count += 1;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+
+                if !entries.is_empty() {
+                    return Ok(entries);
+                }
+            }
+        }
+
+        // Fallback to git command
         let output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
             .args(["log", "--oneline", "-n", &limit.to_string()])

@@ -7,9 +7,10 @@ import { useMakerStore } from '../store/makerStore';
 import { Cockpit } from './Cockpit';
 import { Blueprint } from './Blueprint';
 import { TimeMachine } from './TimeMachine';
+import { RLMTrajectory } from './RLMTrajectory';
 import './Dashboard.css';
 
-type TabType = 'cockpit' | 'blueprint' | 'timemachine';
+type TabType = 'cockpit' | 'blueprint' | 'timemachine' | 'rlm';
 
 export function Dashboard() {
   const { runtimeInitialized, setRuntimeInitialized, workspacePath, setWorkspacePath } = useMakerStore();
@@ -27,8 +28,16 @@ export function Dashboard() {
       // Get current working directory as workspace
       const cwd = await invoke<string>('get_cwd');
       setWorkspacePath(cwd);
-      
+
       await invoke('init_runtime', { workspacePath: cwd });
+
+      // Initialize RLM store for large context handling
+      try {
+        await invoke('init_rlm_store');
+      } catch (rlmError) {
+        console.warn('RLM store initialization failed:', rlmError);
+      }
+
       setRuntimeInitialized(true);
       setInitError(null);
     } catch (e) {
@@ -96,31 +105,38 @@ export function Dashboard() {
       )}
       
       <nav className="tab-nav">
-        <button 
-          className={activeTab === 'cockpit' ? 'active' : ''} 
+        <button
+          className={activeTab === 'cockpit' ? 'active' : ''}
           onClick={() => setActiveTab('cockpit')}
         >
           🎮 Cockpit
         </button>
-        <button 
-          className={activeTab === 'blueprint' ? 'active' : ''} 
+        <button
+          className={activeTab === 'blueprint' ? 'active' : ''}
           onClick={() => { setActiveTab('blueprint'); loadSymbolGraph(); }}
         >
           🏗️ Blueprint
         </button>
-        <button 
-          className={activeTab === 'timemachine' ? 'active' : ''} 
+        <button
+          className={activeTab === 'timemachine' ? 'active' : ''}
           onClick={() => setActiveTab('timemachine')}
         >
           ⏰ Time Machine
         </button>
+        <button
+          className={activeTab === 'rlm' ? 'active' : ''}
+          onClick={() => setActiveTab('rlm')}
+        >
+          🔄 RLM Trace
+        </button>
       </nav>
-      
+
       <main className="dashboard-main">
         <div className="panel-container">
           {activeTab === 'cockpit' && <Cockpit />}
           {activeTab === 'blueprint' && <Blueprint />}
           {activeTab === 'timemachine' && <TimeMachine />}
+          {activeTab === 'rlm' && <RLMTrajectory />}
         </div>
         
         {activeTab === 'cockpit' && (

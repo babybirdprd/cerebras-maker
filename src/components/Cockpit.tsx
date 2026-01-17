@@ -18,6 +18,15 @@ const EVENT_ICONS: Record<string, string> = {
   Snapshot: '📸',
   Rollback: '⏪',
   Error: '❌',
+  // RLM Events
+  RLMStart: '🔄',
+  RLMPeek: '👁️',
+  RLMChunk: '📦',
+  RLMSubQuery: '🔁',
+  RLMSubResult: '💡',
+  RLMRegexFilter: '🔍',
+  RLMLoadContext: '📥',
+  RLMFinal: '🎯',
 };
 
 const EVENT_COLORS: Record<string, string> = {
@@ -32,6 +41,15 @@ const EVENT_COLORS: Record<string, string> = {
   Snapshot: '#fbbf24',
   Rollback: '#f97316',
   Error: '#dc2626',
+  // RLM Events
+  RLMStart: '#a78bfa',
+  RLMPeek: '#60a5fa',
+  RLMChunk: '#c084fc',
+  RLMSubQuery: '#fbbf24',
+  RLMSubResult: '#22c55e',
+  RLMRegexFilter: '#f472b6',
+  RLMLoadContext: '#38bdf8',
+  RLMFinal: '#10b981',
 };
 
 function formatTimestamp(ms: number): string {

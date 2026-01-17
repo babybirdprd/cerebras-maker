@@ -1,10 +1,12 @@
 // Cerebras-MAKER: The L3 Context Engineer
 // PRD Section 3.1: "Semantic Tree-Shaking" - Extract only topologically-relevant code
 // Takes a task from L2's Rhai script and produces a MiniCodebase for L4 Atoms
+// Enhanced with RLM (Recursive Language Model) support for handling large contexts
 
 use super::{Agent, MicroTask};
 use crate::grits;
 use crate::llm::SystemPrompts;
+use crate::maker_core::{ContextType, RLMConfig};
 use grits_core::context::MiniCodebase;
 use grits_core::topology::SymbolGraph;
 use serde::{Deserialize, Serialize};
@@ -102,6 +104,28 @@ pub struct ContextPackage {
     pub constraints: Vec<String>,
     /// Quality metrics
     pub metrics: ContextMetrics,
+    /// RLM mode info (if context exceeds threshold)
+    pub rlm_info: Option<RLMContextInfo>,
+}
+
+/// RLM-specific context information
+/// Used when context exceeds the RLM threshold (default 50K chars)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RLMContextInfo {
+    /// Total character count of the full context
+    pub total_length: usize,
+    /// The type of context (for RLM processing)
+    pub context_type: ContextType,
+    /// Whether RLM mode should be used for processing
+    pub use_rlm: bool,
+    /// Suggested chunk size for RLM processing
+    pub suggested_chunk_size: usize,
+    /// Number of chunks the context would be split into
+    pub estimated_chunks: usize,
+    /// Full context content (stored as variable, not passed to LLM directly)
+    pub full_context: String,
+    /// Context variable name for RLM functions
+    pub context_var_name: String,
 }
 
 /// Quality metrics for the context extraction
@@ -121,8 +145,10 @@ pub struct ContextMetrics {
 
 /// The L3 Context Engineer Agent
 /// Responsible for extracting minimal, precise context for L4 Atoms
+/// Enhanced with RLM support for handling large contexts
 pub struct ContextEngineer {
     config: ContextConfig,
+    rlm_config: RLMConfig,
 }
 
 impl Default for ContextEngineer {
@@ -145,11 +171,30 @@ impl ContextEngineer {
     pub fn new() -> Self {
         Self {
             config: ContextConfig::default(),
+            rlm_config: RLMConfig::default(),
         }
     }
 
     pub fn with_config(config: ContextConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            rlm_config: RLMConfig::default(),
+        }
+    }
+
+    pub fn with_rlm_config(mut self, rlm_config: RLMConfig) -> Self {
+        self.rlm_config = rlm_config;
+        self
+    }
+
+    /// Check if context size exceeds RLM threshold
+    pub fn should_use_rlm(&self, context_length: usize) -> bool {
+        context_length >= self.rlm_config.rlm_threshold
+    }
+
+    /// Get RLM threshold
+    pub fn rlm_threshold(&self) -> usize {
+        self.rlm_config.rlm_threshold
     }
 
     /// Extract context for a micro-task
@@ -225,8 +270,28 @@ impl ContextEngineer {
         // Render to markdown for LLM consumption
         let markdown = self.render_for_atom(&task.atom_type, &mini_codebase, &requirements);
 
-        // Count actual lines
+        // Count actual lines and characters
         let context_lines = markdown.lines().count();
+        let context_length = markdown.len();
+
+        // Determine if RLM mode should be used
+        let rlm_info = if self.should_use_rlm(context_length) {
+            let chunk_size = self.rlm_config.default_chunk_size;
+            let estimated_chunks = (context_length + chunk_size - 1) / chunk_size;
+            let context_var_name = format!("context_{}", task.id.replace('-', "_"));
+
+            Some(RLMContextInfo {
+                total_length: context_length,
+                context_type: ContextType::MiniCodebase,
+                use_rlm: true,
+                suggested_chunk_size: chunk_size,
+                estimated_chunks,
+                full_context: markdown.clone(),
+                context_var_name,
+            })
+        } else {
+            None
+        };
 
         Ok(ContextPackage {
             task_id: task.id.clone(),
@@ -236,6 +301,7 @@ impl ContextEngineer {
             markdown,
             constraints,
             metrics,
+            rlm_info,
         })
     }
 

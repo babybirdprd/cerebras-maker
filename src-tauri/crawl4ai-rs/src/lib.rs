@@ -14,4 +14,5 @@ pub mod http_crawler;
 pub use models::*;
 pub use markdown::*;
 pub use content_filter::*;
-pub use http_crawler::HttpCrawler;
+pub use http_crawler::{HttpCrawler, HttpCrawlConfig, HttpCrawlResult};
+pub use extraction_strategy::{JsonCssExtractionStrategy, JsonXPathExtractionStrategy, RegexExtractionStrategy};

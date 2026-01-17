@@ -3,8 +3,10 @@
 // Takes a ContextPackage from L3 and executes a focused LLM call
 
 use super::context_engineer::ContextPackage;
+use crate::grits;
 use crate::llm::{LlmConfig, LlmProvider, Message, SystemPrompts};
 use crate::maker_core::{AtomResult, AtomType, SpawnFlags};
+use grits_core::topology::virtual_apply::{ChangeType, ProposedChange, VirtualApply};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Instant;
@@ -184,6 +186,7 @@ impl AtomExecutor {
             AtomType::Architect => SystemPrompts::architect(),
             AtomType::Planner => input.atom_type.system_prompt(),
             AtomType::Validator => input.atom_type.system_prompt(),
+            AtomType::RLMProcessor => SystemPrompts::atom_rlm_processor(),
         };
 
         // Add JSON output instruction if required
@@ -301,7 +304,7 @@ impl AtomExecutor {
         None
     }
 
-    /// Check for red flags in the output
+    /// Check for red flags in the output using VirtualApply for architectural validation
     fn check_red_flags(&self, result: &AtomResult, input: &AtomInput) -> Option<String> {
         // Check for dangerous patterns in code output
         if matches!(input.atom_type, AtomType::Coder) {
@@ -320,6 +323,11 @@ impl AtomExecutor {
                     return Some(format!("Red flag: {} - found '{}'", reason, pattern));
                 }
             }
+
+            // Use VirtualApply for architectural validation
+            if let Some(red_flag) = self.check_architectural_red_flags(&result.output) {
+                return Some(red_flag);
+            }
         }
 
         // Check if constraints were violated
@@ -337,6 +345,85 @@ impl AtomExecutor {
                     }
                 }
             }
+        }
+
+        None
+    }
+
+    /// Check for architectural red flags using VirtualApply
+    /// PRD 3.2: "Virtual Apply" - Detect cycles and layer violations before applying code
+    fn check_architectural_red_flags(&self, code_output: &str) -> Option<String> {
+        // Get the current symbol graph
+        let graph = grits::get_cached_graph()?;
+
+        // Parse code output into proposed changes
+        let code_changes = self.parse_code_output(code_output);
+        if code_changes.is_empty() {
+            return None;
+        }
+
+        // Convert CodeChange to ProposedChange for VirtualApply
+        let proposed_changes: Vec<ProposedChange> = code_changes
+            .iter()
+            .map(|change| ProposedChange {
+                file_path: change.file_path.clone(),
+                // Determine change type based on file existence
+                change_type: if std::path::Path::new(&change.file_path).exists() {
+                    ChangeType::ModifyFile
+                } else {
+                    ChangeType::CreateFile
+                },
+                code_content: change.content.clone(),
+                language: change.language.clone().unwrap_or_else(|| {
+                    // Infer language from file extension
+                    change.file_path
+                        .rsplit('.')
+                        .next()
+                        .map(|ext| match ext {
+                            "rs" => "rust",
+                            "ts" | "tsx" => "typescript",
+                            "js" | "jsx" => "javascript",
+                            "py" => "python",
+                            "go" => "go",
+                            _ => "unknown",
+                        })
+                        .unwrap_or("unknown")
+                        .to_string()
+                }),
+            })
+            .collect();
+
+        // Load layer config if available
+        let layer_config = grits::get_cached_workspace_path()
+            .and_then(|ws_path| {
+                grits_core::topology::layers::load_layer_config(std::path::Path::new(&ws_path)).ok()
+            });
+
+        // Run virtual apply validation
+        let virtual_apply = VirtualApply::new(graph, layer_config);
+        let result = virtual_apply.validate(&proposed_changes);
+
+        if !result.is_safe {
+            let mut errors = Vec::new();
+
+            if result.introduces_cycles {
+                errors.push(format!(
+                    "Would introduce {} new cycle(s) (Betti_1: {} -> {})",
+                    result.new_betti_1 - result.original_betti_1,
+                    result.original_betti_1,
+                    result.new_betti_1
+                ));
+            }
+
+            for violation in &result.layer_violations {
+                errors.push(format!(
+                    "Layer violation: {} ({}) -> {} ({})",
+                    violation.from_symbol, violation.from_layer,
+                    violation.to_symbol, violation.to_layer
+                ));
+            }
+
+            return Some(format!("Architectural red flags: {}", errors.join("; ")));
         }
 
         None

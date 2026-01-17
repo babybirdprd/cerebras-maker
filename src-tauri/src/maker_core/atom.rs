@@ -24,6 +24,9 @@ pub enum AtomType {
     Architect,
     /// GritsAnalyzer atom - performs topology analysis
     GritsAnalyzer,
+    /// RLMProcessor atom - processes large contexts using Recursive LM patterns
+    /// Based on: "Recursive Language Models: Scaling Context with Recursive Prompt Decomposition"
+    RLMProcessor,
 }
 
 impl AtomType {
@@ -62,6 +65,11 @@ impl AtomType {
                 "You are a GritsAnalyzer Atom. Your only job is to analyze code topology. \
                  Return a JSON object with 'cycles', 'layers', 'violations', and 'red_flags' arrays."
             }
+            AtomType::RLMProcessor => {
+                "You are an RLM Processor Atom. You can interact with large contexts programmatically. \
+                 Use peek_context(), chunk_context(), and llm_query() to process context variables. \
+                 Return a JSON object with 'answer', 'iterations', and 'sub_calls' fields."
+            }
         }
     }
 
@@ -76,6 +84,7 @@ impl AtomType {
             AtomType::Tester => 2000,
             AtomType::Architect => 1500,
             AtomType::GritsAnalyzer => 1000,
+            AtomType::RLMProcessor => 4000, // RLM needs more output for complex reasoning
         }
     }
 
@@ -90,6 +99,7 @@ impl AtomType {
             "tester" => Some(AtomType::Tester),
             "architect" => Some(AtomType::Architect),
             "gritsanalyzer" | "grits" => Some(AtomType::GritsAnalyzer),
+            "rlmprocessor" | "rlm" => Some(AtomType::RLMProcessor),
             _ => None,
         }
     }
@@ -105,6 +115,7 @@ impl AtomType {
             AtomType::Tester => "Tester",
             AtomType::Architect => "Architect",
             AtomType::GritsAnalyzer => "GritsAnalyzer",
+            AtomType::RLMProcessor => "RLMProcessor",
         }
     }
 }

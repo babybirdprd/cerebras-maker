@@ -13,7 +13,10 @@
 //! gr context assemble --issue <ID> --format mini-repo
 //! ```
 
-use crate::topology::{analysis::TopologicalAnalysis, SymbolGraph};
+use crate::topology::{
+    analysis::{InvariantResult, LayerConfig, TopologicalAnalysis},
+    SymbolGraph,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -109,12 +112,25 @@ pub struct ContextMetadata {
 
 impl MiniCodebase {
     /// Assemble a mini codebase from seed symbols
+    /// Convenience wrapper that calls assemble_with_layers with no layer config
     pub fn assemble(
         graph: &SymbolGraph,
         seed_symbols: Vec<String>,
         depth: usize,
         strength_threshold: f32,
         issue_id: Option<String>,
+    ) -> Self {
+        Self::assemble_with_layers(graph, seed_symbols, depth, strength_threshold, issue_id, None)
+    }
+
+    /// Assemble a mini codebase with optional layer configuration for forbidden dependency extraction
+    pub fn assemble_with_layers(
+        graph: &SymbolGraph,
+        seed_symbols: Vec<String>,
+        depth: usize,
+        strength_threshold: f32,
+        issue_id: Option<String>,
+        layer_config: Option<&LayerConfig>,
     ) -> Self {
         // Collect all relevant symbol IDs using star neighborhood
         let mut relevant_ids = HashSet::new();
@@ -176,22 +192,64 @@ impl MiniCodebase {
                 .unwrap()
         });
 
-        // Build invariants
+        // Extract forbidden dependencies and layer constraints from layer config
+        let (forbidden_dependencies, layer_constraints) = if let Some(config) = layer_config {
+            let invariant_result = InvariantResult::check(graph, config);
+
+            // Extract forbidden dependencies: symbols that would create layer violations
+            let forbidden: Vec<String> = invariant_result
+                .layer_violations
+                .iter()
+                .map(|v| format!("{} -> {} ({})", v.from_node, v.to_node, v.violation_type))
+                .collect();
+
+            // Extract layer constraints as human-readable rules
+            let constraints: Vec<String> = config
+                .layers
+                .iter()
+                .map(|layer| {
+                    if layer.allowed_deps.is_empty() {
+                        format!("Layer '{}' has no external dependencies (base layer)", layer.name)
+                    } else {
+                        format!(
+                            "Layer '{}' may only depend on: [{}]",
+                            layer.name,
+                            layer.allowed_deps.join(", ")
+                        )
+                    }
+                })
+                .collect();
+
+            (forbidden, constraints)
+        } else {
+            (Vec::new(), Vec::new())
+        };
+
+        // Build invariants with extracted layer information
+        let mut notes = Vec::new();
+        if analysis.betti_1 > 0 {
+            notes.push(format!(
+                "⚠️ {} cycles detected. Avoid adding new dependencies that create cycles.",
+                analysis.betti_1
+            ));
+        } else {
+            notes.push(
+                "✓ No cycles. Maintain this by following unidirectional dependencies.".to_string(),
+            );
+        }
+
+        if !forbidden_dependencies.is_empty() {
+            notes.push(format!(
+                "⚠️ {} layer violations detected. Review forbidden_dependencies.",
+                forbidden_dependencies.len()
+            ));
+        }
+
         let invariants = ContextInvariants {
             betti_1: analysis.betti_1,
-            forbidden_dependencies: Vec::new(), // TODO: Extract from layer analysis
-            layer_constraints: Vec::new(),
-            notes: if analysis.betti_1 > 0 {
-                vec![format!(
-                    "⚠️ {} cycles detected. Avoid adding new dependencies that create cycles.",
-                    analysis.betti_1
-                )]
-            } else {
-                vec![
-                    "✓ No cycles. Maintain this by following unidirectional dependencies."
-                        .to_string(),
-                ]
-            },
+            forbidden_dependencies,
+            layer_constraints,
+            notes,
         };
 
         // Build metadata

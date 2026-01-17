@@ -1,6 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Circle, CheckCircle2, CircleDashed, ChevronRight, ChevronDown, FileText, AlertTriangle, Code, StickyNote, Hash, RefreshCw } from 'lucide-react';
-import { MOCK_PLAN } from '../constants';
+import { Circle, CheckCircle2, CircleDashed, ChevronRight, ChevronDown, FileText, AlertTriangle, Code, StickyNote, Hash, RefreshCw, ListTodo } from 'lucide-react';
 import { Task } from '../types';
 import { parsePlan, ParsedPlan, ParsedTask } from '../hooks/useTauri';
 
@@ -164,7 +163,9 @@ const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
   // Convert parsed tasks to display format
   const displayTasks: Task[] = parsedPlan
     ? parsedPlan.tasks.map(t => convertToTask(t, 0))
-    : MOCK_PLAN;
+    : [];
+
+  const hasPlan = displayTasks.length > 0;
 
   return (
     <div className="h-full flex flex-col p-4 lg:p-6">
@@ -176,7 +177,7 @@ const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
                <p className="text-zinc-400 text-sm mt-1">
                  {parsedPlan
                    ? `${parsedPlan.task_count} tasks • ${parsedPlan.dependencies.length} dependencies`
-                   : 'System 2 Decomposition • Recursive Depth: 3'
+                   : 'No plan loaded'
                  }
                </p>
            </div>
@@ -184,13 +185,15 @@ const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
              {loading && (
                <RefreshCw size={14} className="animate-spin text-indigo-400" />
              )}
-             <button
-               onClick={() => { setShowSource(!showSource); onViewSource?.(); }}
-               className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors"
-             >
-                 <FileText size={14} />
-                 <span className="hidden sm:inline">{showSource ? 'Hide Source' : 'View Source'}</span>
-             </button>
+             {planContent && (
+               <button
+                 onClick={() => { setShowSource(!showSource); onViewSource?.(); }}
+                 className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors"
+               >
+                   <FileText size={14} />
+                   <span className="hidden sm:inline">{showSource ? 'Hide Source' : 'View Source'}</span>
+               </button>
+             )}
            </div>
        </div>
 
@@ -207,9 +210,19 @@ const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
        )}
 
        <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg overflow-y-auto p-2 scrollbar-thin">
-           {displayTasks.map(task => (
+           {hasPlan ? (
+             displayTasks.map(task => (
                <TaskItem key={task.id} task={task} />
-           ))}
+             ))
+           ) : (
+             <div className="flex flex-col items-center justify-center h-full text-zinc-500 py-12">
+               <ListTodo size={48} className="mb-4 opacity-30" />
+               <p className="text-sm font-medium">No execution plan loaded</p>
+               <p className="text-xs mt-1 text-zinc-600">
+                 Complete the PRD interrogation to generate a plan
+               </p>
+             </div>
+           )}
        </div>
     </div>
   );
