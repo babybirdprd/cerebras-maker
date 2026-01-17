@@ -52,31 +52,41 @@ impl ParserCache {
                 if self.rust.is_none() {
                     self.rust = Some(CodeParser::new("rust")?);
                 }
-                Ok(self.rust.as_mut().unwrap())
+                self.rust
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to initialize rust parser"))
             }
             "typescript" => {
                 if self.typescript.is_none() {
                     self.typescript = Some(CodeParser::new("typescript")?);
                 }
-                Ok(self.typescript.as_mut().unwrap())
+                self.typescript
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to initialize typescript parser"))
             }
             "javascript" => {
                 if self.javascript.is_none() {
                     self.javascript = Some(CodeParser::new("javascript")?);
                 }
-                Ok(self.javascript.as_mut().unwrap())
+                self.javascript
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to initialize javascript parser"))
             }
             "python" => {
                 if self.python.is_none() {
                     self.python = Some(CodeParser::new("python")?);
                 }
-                Ok(self.python.as_mut().unwrap())
+                self.python
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to initialize python parser"))
             }
             "go" => {
                 if self.go.is_none() {
                     self.go = Some(CodeParser::new("go")?);
                 }
-                Ok(self.go.as_mut().unwrap())
+                self.go
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Failed to initialize go parser"))
             }
             _ => Err(anyhow::anyhow!("Unsupported language: {}", lang)),
         }

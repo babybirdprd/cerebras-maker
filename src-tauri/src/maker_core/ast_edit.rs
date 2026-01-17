@@ -11,6 +11,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+/// Maximum cache size to prevent memory issues
+const MAX_CACHE_SIZE: usize = 100;
+
 /// Supported languages for AST parsing
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum SupportedLanguage {
@@ -84,6 +87,14 @@ impl AstEditor {
     pub fn new() -> Self {
         Self {
             cache: HashMap::new(),
+        }
+    }
+
+    /// Evict cache if it exceeds the maximum size to prevent memory issues
+    fn maybe_evict_cache(&mut self) {
+        if self.cache.len() > MAX_CACHE_SIZE {
+            // Remove oldest entries (just clear for simplicity)
+            self.cache.clear();
         }
     }
 

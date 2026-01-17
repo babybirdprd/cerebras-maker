@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Rewind, FastForward, Play, Pause, GitCommit, RotateCcw } from 'lucide-react';
 import { getGitHistory, checkoutCommit, getSnapshots, HistoryEntry, Snapshot } from '../hooks/useTauri';
+import { useMakerStore } from '../store/makerStore';
 
 interface TimeSliderProps {
   onTimeTravel?: (commitHash: string) => void;
 }
 
 const TimeSlider: React.FC<TimeSliderProps> = ({ onTimeTravel }) => {
+  const { workspacePath } = useMakerStore();
   const [isPlaying, setIsPlaying] = useState(false);
   const [value, setValue] = useState(0);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -18,15 +20,18 @@ const TimeSlider: React.FC<TimeSliderProps> = ({ onTimeTravel }) => {
   const max = Math.max(0, history.length - 1);
   const currentEntry = history[value];
 
-  // Load git history on mount
+  // Load git history on mount or when workspace changes
   useEffect(() => {
-    loadData();
-  }, []);
+    if (workspacePath) {
+      loadData();
+    }
+  }, [workspacePath]);
 
   async function loadData() {
+    if (!workspacePath) return;
     try {
       const [historyData, snapshotData] = await Promise.all([
-        getGitHistory(100),
+        getGitHistory(workspacePath, 100),
         getSnapshots().catch(() => [] as Snapshot[])
       ]);
       setHistory(historyData);
@@ -65,11 +70,11 @@ const TimeSlider: React.FC<TimeSliderProps> = ({ onTimeTravel }) => {
   };
 
   const handleTimeTravel = async () => {
-    if (!currentEntry) return;
+    if (!currentEntry || !workspacePath) return;
     setLoading(true);
     setStatus(null);
     try {
-      await checkoutCommit(currentEntry.hash);
+      await checkoutCommit(workspacePath, currentEntry.hash);
       setStatus(`✅ Checked out to ${currentEntry.hash.slice(0, 7)}`);
       onTimeTravel?.(currentEntry.hash);
     } catch (e) {

@@ -189,7 +189,7 @@ impl MiniCodebase {
             b.pagerank
                 .unwrap_or(0.0)
                 .partial_cmp(&a.pagerank.unwrap_or(0.0))
-                .unwrap()
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Extract forbidden dependencies and layer constraints from layer config
@@ -287,7 +287,11 @@ impl MiniCodebase {
                     let full_path = base_path.join(&symbol.file_path);
                     if let Ok(c) = fs::read_to_string(full_path) {
                         file_cache.insert(symbol.file_path.clone(), c);
-                        file_cache.get(&symbol.file_path).unwrap()
+                        // Safe: we just inserted this key, but use match for robustness
+                        match file_cache.get(&symbol.file_path) {
+                            Some(content) => content,
+                            None => continue,
+                        }
                     } else {
                         continue;
                     }

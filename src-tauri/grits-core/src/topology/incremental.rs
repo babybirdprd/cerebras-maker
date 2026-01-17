@@ -202,25 +202,29 @@ impl IncrementalScanner {
                             .parse_file(&file_id, &content, &mut temp_graph)
                             .is_ok()
                         {
-                            let mut results = new_symbols.lock().unwrap();
-                            for (id, symbol) in temp_graph.nodes {
-                                let edges: Vec<_> = temp_graph
-                                    .edges
-                                    .iter()
-                                    .filter(|(from, _, _)| from == &id)
-                                    .map(|(from, to, edge)| {
-                                        (from.clone(), to.clone(), edge.relation.clone())
-                                    })
-                                    .collect();
-                                results.push((id, symbol, edges));
+                            // Handle potential mutex poisoning gracefully
+                            if let Ok(mut results) = new_symbols.lock() {
+                                for (id, symbol) in temp_graph.nodes {
+                                    let edges: Vec<_> = temp_graph
+                                        .edges
+                                        .iter()
+                                        .filter(|(from, _, _)| from == &id)
+                                        .map(|(from, to, edge)| {
+                                            (from.clone(), to.clone(), edge.relation.clone())
+                                        })
+                                        .collect();
+                                    results.push((id, symbol, edges));
+                                }
                             }
                         }
                     }
                 }
             });
 
-        // Merge results into cache graph
-        let results = new_symbols.into_inner().unwrap();
+        // Merge results into cache graph - handle mutex poisoning
+        let results = new_symbols
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut added_nodes = Vec::new();
         let mut modified_edges = Vec::new();
 

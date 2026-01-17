@@ -292,9 +292,14 @@ impl TopologicalAnalysis {
                 let nodes_j: HashSet<_> = triangles[j].nodes.iter().collect();
                 let common: Vec<_> = nodes_i.intersection(&nodes_j).collect();
 
+                // CRIT-6: Use safe pattern instead of unwrap() to prevent panics
                 if common.len() >= 2 {
-                    triangle_graph.get_mut(&i).unwrap().insert(j);
-                    triangle_graph.get_mut(&j).unwrap().insert(i);
+                    if let Some(entry) = triangle_graph.get_mut(&i) {
+                        entry.insert(j);
+                    }
+                    if let Some(entry) = triangle_graph.get_mut(&j) {
+                        entry.insert(i);
+                    }
                 }
             }
         }

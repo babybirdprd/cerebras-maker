@@ -77,6 +77,14 @@ impl Interrogator {
     /// Analyze a user request for ambiguity
     /// Calls the LLM to identify "Known Unknowns" and returns structured result
     pub async fn analyze(&self, request: &str, context: &AgentContext) -> Result<InterrogatorResult, String> {
+        // HIGH-2: Validate input before processing
+        if request.trim().is_empty() {
+            return Err("Request cannot be empty".to_string());
+        }
+        if context.workspace_path.is_empty() {
+            return Err("Workspace path must be provided in context".to_string());
+        }
+
         // Build the user prompt with context
         let user_prompt = self.build_user_prompt(request, context);
 

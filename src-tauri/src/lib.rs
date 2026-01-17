@@ -39,6 +39,49 @@ pub use llm::{LlmProvider, LlmConfig, Message, Role};
 // Re-export generator types
 pub use generators::{ScriptGenerator, GeneratorRegistry, GenerationResult, RhaiScriptGenerator, TaskScriptGenerator};
 
+// Validation helpers for Tauri commands
+mod validation {
+    use std::path::Path;
+
+    /// Standardized error response helper
+    pub fn make_error(operation: &str, details: &str) -> String {
+        format!("[{}] {}", operation, details)
+    }
+
+    /// Standardized error with code
+    pub fn make_error_with_code(operation: &str, code: &str, details: &str) -> String {
+        format!("[{}:{}] {}", operation, code, details)
+    }
+
+    pub fn validate_workspace_path(path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("Workspace path cannot be empty".to_string());
+        }
+        if !Path::new(path).exists() {
+            return Err(format!("Workspace path does not exist: {}", path));
+        }
+        Ok(())
+    }
+
+    pub fn validate_non_empty(value: &str, field_name: &str) -> Result<(), String> {
+        if value.trim().is_empty() {
+            return Err(format!("{} cannot be empty", field_name));
+        }
+        Ok(())
+    }
+
+    pub fn validate_file_path(path: &str) -> Result<(), String> {
+        if path.is_empty() {
+            return Err("File path cannot be empty".to_string());
+        }
+        // Check for path traversal attempts
+        if path.contains("..") {
+            return Err("Path traversal not allowed".to_string());
+        }
+        Ok(())
+    }
+}
+
 // Global runtime instance (lazy initialized)
 static RUNTIME: Mutex<Option<CodeModeRuntime>> = Mutex::new(None);
 
@@ -271,8 +314,12 @@ fn greet(name: &str) -> String {
 /// Load the semantic graph from a workspace directory
 #[tauri::command]
 fn load_symbol_graph(workspace_path: String) -> Result<serde_json::Value, String> {
-    let graph = grits::load_workspace_graph(&workspace_path)?;
-    serde_json::to_value(&graph).map_err(|e| e.to_string())
+    use validation::{make_error, make_error_with_code};
+
+    let graph = grits::load_workspace_graph(&workspace_path)
+        .map_err(|e| make_error("WORKSPACE_ANALYSIS", &e))?;
+    serde_json::to_value(&graph)
+        .map_err(|e| make_error_with_code("WORKSPACE_ANALYSIS", "SERIALIZE", &e.to_string()))
 }
 
 /// Assemble a mini codebase for an issue
@@ -310,9 +357,13 @@ fn check_proposed_changes(
 /// Analyze topology and return full analysis
 #[tauri::command]
 fn analyze_topology() -> Result<serde_json::Value, String> {
-    let graph = grits::get_cached_graph().ok_or("No cached graph. Call load_symbol_graph first.")?;
+    use validation::make_error_with_code;
+
+    let graph = grits::get_cached_graph()
+        .ok_or_else(|| make_error_with_code("TOPOLOGY_ANALYSIS", "NO_GRAPH", "No cached graph. Call load_symbol_graph first."))?;
     let analysis = TopologicalAnalysis::analyze(&graph);
-    serde_json::to_value(&analysis).map_err(|e| e.to_string())
+    serde_json::to_value(&analysis)
+        .map_err(|e| make_error_with_code("TOPOLOGY_ANALYSIS", "SERIALIZE", &e.to_string()))
 }
 
 // ============================================================================
@@ -354,10 +405,11 @@ fn validate_multi_file_edit(
     use grits_core::topology::virtual_apply::{ChangeType, ProposedChange, VirtualApply};
     use grits_core::topology::layers::load_layer_config;
     use std::path::Path;
+    use validation::make_error_with_code;
 
     // Ensure we have a symbol graph loaded
     let graph = grits::get_cached_graph()
-        .ok_or("No cached graph. Call load_symbol_graph first.")?;
+        .ok_or_else(|| make_error_with_code("MULTI_FILE_EDIT", "NO_GRAPH", "No cached graph. Call load_symbol_graph first."))?;
 
     // Load layer config if available
     let layer_config = load_layer_config(Path::new(&workspace_path)).ok();
@@ -611,8 +663,10 @@ async fn run_tests(
 ) -> Result<TestExecutionResult, String> {
     use std::process::Command;
     use std::time::Instant;
+    use validation::make_error;
 
-    let framework = detect_test_framework(workspace_path.clone()).await?;
+    let framework = detect_test_framework(workspace_path.clone()).await
+        .map_err(|e| make_error("TEST_EXEC", &e))?;
     let start = Instant::now();
     let _timeout = timeout_seconds.unwrap_or(300); // 5 minutes default (reserved for future timeout implementation)
 
@@ -634,7 +688,8 @@ async fn run_tests(
         }
     }
 
-    let output = cmd.output().map_err(|e| format!("Failed to run tests: {}", e))?;
+    let output = cmd.output()
+        .map_err(|e| make_error("TEST_EXEC", &format!("Failed to run tests: {}", e)))?;
     let duration = start.elapsed().as_millis() as u64;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
@@ -865,8 +920,13 @@ Return ONLY the test code, no explanations."#,
 /// Initialize the MAKER runtime for a workspace
 #[tauri::command]
 fn init_runtime(workspace_path: String) -> Result<String, String> {
+    use validation::make_error;
+
+    validation::validate_workspace_path(&workspace_path)
+        .map_err(|e| make_error("RUNTIME_INIT", &e))?;
+
     let runtime = CodeModeRuntime::new(&workspace_path)
-        .map_err(|e| format!("Failed to initialize runtime: {}", e))?;
+        .map_err(|e| make_error("RUNTIME_INIT", &format!("Failed to create runtime: {}", e)))?;
 
     if let Ok(mut global) = RUNTIME.lock() {
         *global = Some(runtime);
@@ -874,7 +934,8 @@ fn init_runtime(workspace_path: String) -> Result<String, String> {
 
     // Also initialize the ShadowGit for the workspace
     let mut shadow_git = ShadowGit::new(&workspace_path);
-    shadow_git.init().map_err(|e| format!("Failed to initialize shadow git: {}", e))?;
+    shadow_git.init()
+        .map_err(|e| make_error("RUNTIME_INIT", &format!("Shadow git init failed: {}", e)))?;
 
     if let Ok(mut sg) = SHADOW_GIT.lock() {
         *sg = Some(shadow_git);
@@ -886,23 +947,29 @@ fn init_runtime(workspace_path: String) -> Result<String, String> {
 /// Execute a Rhai script
 #[tauri::command]
 fn execute_script(script: String) -> Result<serde_json::Value, String> {
+    use validation::{make_error, make_error_with_code};
+
+    validation::validate_non_empty(&script, "Script")
+        .map_err(|e| make_error("SCRIPT_EXEC", &e))?;
+
     let runtime = RUNTIME.lock()
-        .map_err(|_| "Failed to acquire runtime lock")?;
+        .map_err(|_| make_error_with_code("SCRIPT_EXEC", "LOCK", "Failed to acquire runtime lock"))?;
 
     let runtime = runtime.as_ref()
-        .ok_or("Runtime not initialized. Call init_runtime first.")?;
+        .ok_or_else(|| make_error_with_code("SCRIPT_EXEC", "NOT_INIT", "Runtime not initialized. Call init_runtime first."))?;
 
     let result = runtime.execute_script(&script)
-        .map_err(|e| format!("Script execution failed: {}", e))?;
+        .map_err(|e| make_error("SCRIPT_EXEC", &format!("Execution failed: {}", e)))?;
 
-    serde_json::to_value(&result.to_string()).map_err(|e| e.to_string())
+    serde_json::to_value(&result.to_string())
+        .map_err(|e| make_error_with_code("SCRIPT_EXEC", "SERIALIZE", &e.to_string()))
 }
 
 /// Get the execution log (for Cockpit)
 #[tauri::command]
 fn get_execution_log() -> Result<serde_json::Value, String> {
     let runtime = RUNTIME.lock()
-        .map_err(|_| "Failed to acquire runtime lock")?;
+        .map_err(|_| "Failed to acquire runtime lock while getting execution log")?;
 
     let runtime = runtime.as_ref()
         .ok_or("Runtime not initialized")?;
@@ -915,7 +982,7 @@ fn get_execution_log() -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn get_execution_metrics() -> Result<ExecutionMetrics, String> {
     let metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while getting execution metrics")?;
 
     Ok(metrics.clone())
 }
@@ -928,7 +995,7 @@ fn update_execution_metrics(
     red_flags_added: Option<usize>,
 ) -> Result<(), String> {
     let mut metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while updating execution metrics")?;
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -962,7 +1029,7 @@ fn update_execution_metrics(
 #[tauri::command]
 fn record_atom_spawned() -> Result<(), String> {
     let mut metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while recording atom spawn")?;
 
     metrics.total_atoms_spawned += 1;
     metrics.active_atoms += 1;
@@ -978,7 +1045,7 @@ fn record_atom_spawned() -> Result<(), String> {
 #[tauri::command]
 fn record_atom_completed(tokens_used: u64, had_red_flag: bool) -> Result<(), String> {
     let mut metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while recording atom completion")?;
 
     if metrics.active_atoms > 0 {
         metrics.active_atoms -= 1;
@@ -1010,7 +1077,7 @@ fn record_atom_completed(tokens_used: u64, had_red_flag: bool) -> Result<(), Str
 #[tauri::command]
 fn record_shadow_commit() -> Result<(), String> {
     let mut metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while recording shadow commit")?;
 
     metrics.shadow_commits += 1;
 
@@ -1021,7 +1088,7 @@ fn record_shadow_commit() -> Result<(), String> {
 #[tauri::command]
 fn reset_execution_metrics() -> Result<(), String> {
     let mut metrics = EXECUTION_METRICS.lock()
-        .map_err(|_| "Failed to acquire metrics lock")?;
+        .map_err(|_| "Failed to acquire metrics lock while resetting metrics")?;
 
     *metrics = ExecutionMetrics::default();
 
@@ -1032,7 +1099,7 @@ fn reset_execution_metrics() -> Result<(), String> {
 #[tauri::command]
 fn get_voting_state() -> Result<VotingState, String> {
     let state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while getting voting state")?;
 
     Ok(state.clone())
 }
@@ -1041,7 +1108,7 @@ fn get_voting_state() -> Result<VotingState, String> {
 #[tauri::command]
 fn start_voting(task_id: String, task_description: String) -> Result<(), String> {
     let mut state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while starting voting session")?;
 
     *state = VotingState {
         task_id,
@@ -1062,7 +1129,7 @@ fn add_voting_candidate(
     red_flags: Vec<String>,
 ) -> Result<usize, String> {
     let mut state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while adding candidate")?;
 
     let id = state.candidates.len() + 1;
     let status = if red_flags.is_empty() { "pending" } else { "rejected" };
@@ -1083,7 +1150,7 @@ fn add_voting_candidate(
 #[tauri::command]
 fn record_vote(candidate_id: usize) -> Result<(), String> {
     let mut state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while recording vote")?;
 
     if let Some(candidate) = state.candidates.iter_mut().find(|c| c.id == candidate_id) {
         candidate.votes += 1;
@@ -1096,7 +1163,7 @@ fn record_vote(candidate_id: usize) -> Result<(), String> {
 #[tauri::command]
 fn complete_voting(winner_id: usize) -> Result<(), String> {
     let mut state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while completing voting")?;
 
     state.is_voting = false;
     state.winner_id = Some(winner_id);
@@ -1117,7 +1184,7 @@ fn complete_voting(winner_id: usize) -> Result<(), String> {
 #[tauri::command]
 fn clear_voting_state() -> Result<(), String> {
     let mut state = VOTING_STATE.lock()
-        .map_err(|_| "Failed to acquire voting state lock")?;
+        .map_err(|_| "Failed to acquire voting state lock while clearing voting state")?;
 
     *state = VotingState::default();
 
@@ -1132,14 +1199,19 @@ fn clear_voting_state() -> Result<(), String> {
 /// PRD 5.1: "Before any Rhai script touches disk, gitoxide creates a blob"
 #[tauri::command]
 fn create_snapshot(message: String) -> Result<serde_json::Value, String> {
+    use validation::{make_error, make_error_with_code};
+
+    validation::validate_non_empty(&message, "Snapshot message")
+        .map_err(|e| make_error("SNAPSHOT", &e))?;
+
     let mut sg = SHADOW_GIT.lock()
-        .map_err(|_| "Failed to acquire shadow git lock")?;
+        .map_err(|_| make_error_with_code("SNAPSHOT", "LOCK", "Failed to acquire shadow git lock"))?;
 
     let shadow_git = sg.as_mut()
-        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+        .ok_or_else(|| make_error_with_code("SNAPSHOT", "NOT_INIT", "Shadow Git not initialized. Call init_runtime first."))?;
 
     let snapshot = shadow_git.snapshot(&message)
-        .map_err(|e| format!("Failed to create snapshot: {}", e))?;
+        .map_err(|e| make_error("SNAPSHOT", &format!("Failed to create: {}", e)))?;
 
     Ok(serde_json::json!({
         "id": snapshot.id,
@@ -1153,14 +1225,16 @@ fn create_snapshot(message: String) -> Result<serde_json::Value, String> {
 /// PRD 5.1: "gitoxide reverts the index to the snapshot instantly"
 #[tauri::command]
 fn rollback_snapshot() -> Result<String, String> {
+    use validation::{make_error, make_error_with_code};
+
     let mut sg = SHADOW_GIT.lock()
-        .map_err(|_| "Failed to acquire shadow git lock")?;
+        .map_err(|_| make_error_with_code("SNAPSHOT", "LOCK", "Failed to acquire shadow git lock"))?;
 
     let shadow_git = sg.as_mut()
-        .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
+        .ok_or_else(|| make_error_with_code("SNAPSHOT", "NOT_INIT", "Shadow Git not initialized. Call init_runtime first."))?;
 
     shadow_git.rollback()
-        .map_err(|e| format!("Failed to rollback: {}", e))?;
+        .map_err(|e| make_error("SNAPSHOT", &format!("Rollback failed: {}", e)))?;
 
     Ok("Rolled back to previous snapshot".to_string())
 }
@@ -1169,7 +1243,7 @@ fn rollback_snapshot() -> Result<String, String> {
 #[tauri::command]
 fn rollback_to_snapshot(snapshot_id: String) -> Result<String, String> {
     let mut sg = SHADOW_GIT.lock()
-        .map_err(|_| "Failed to acquire shadow git lock")?;
+        .map_err(|_| "Failed to acquire shadow git lock while rolling back to specific snapshot")?;
 
     let shadow_git = sg.as_mut()
         .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
@@ -1185,7 +1259,7 @@ fn rollback_to_snapshot(snapshot_id: String) -> Result<String, String> {
 #[tauri::command]
 fn squash_snapshots(final_message: String) -> Result<serde_json::Value, String> {
     let mut sg = SHADOW_GIT.lock()
-        .map_err(|_| "Failed to acquire shadow git lock")?;
+        .map_err(|_| "Failed to acquire shadow git lock while squashing snapshots")?;
 
     let shadow_git = sg.as_mut()
         .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
@@ -1203,7 +1277,7 @@ fn squash_snapshots(final_message: String) -> Result<serde_json::Value, String> 
 #[tauri::command]
 fn get_snapshots() -> Result<serde_json::Value, String> {
     let sg = SHADOW_GIT.lock()
-        .map_err(|_| "Failed to acquire shadow git lock")?;
+        .map_err(|_| "Failed to acquire shadow git lock while getting snapshots")?;
 
     let shadow_git = sg.as_ref()
         .ok_or("Shadow Git not initialized. Call init_runtime first.")?;
@@ -1223,8 +1297,9 @@ fn get_snapshots() -> Result<serde_json::Value, String> {
 
 /// Checkout to a specific git commit (for time travel)
 #[tauri::command]
-fn checkout_commit(commit_hash: String) -> Result<String, String> {
+fn checkout_commit(workspace_path: String, commit_hash: String) -> Result<String, String> {
     let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
         .args(["checkout", &commit_hash])
         .output()
         .map_err(|e| format!("Failed to checkout: {}", e))?;
@@ -1239,8 +1314,9 @@ fn checkout_commit(commit_hash: String) -> Result<String, String> {
 
 /// Get git history (for Time Machine)
 #[tauri::command]
-fn get_git_history(limit: usize) -> Result<serde_json::Value, String> {
+fn get_git_history(workspace_path: String, limit: usize) -> Result<serde_json::Value, String> {
     let output = std::process::Command::new("git")
+        .current_dir(&workspace_path)
         .args(["log", "--oneline", "-n", &limit.to_string()])
         .output()
         .map_err(|e| format!("Failed to get git history: {}", e))?;
@@ -1319,8 +1395,15 @@ fn save_settings(settings: AppSettings) -> Result<(), String> {
     }
     let json = serde_json::to_string_pretty(&settings)
         .map_err(|e| format!("Failed to serialize settings: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Failed to write settings: {}", e))
+    std::fs::write(&path, &json)
+        .map_err(|e| format!("Failed to write settings: {}", e))?;
+
+    // Update cached settings so get_llm_provider uses them immediately
+    if let Ok(mut cached) = CACHED_SETTINGS.lock() {
+        *cached = Some(settings);
+    }
+
+    Ok(())
 }
 
 /// Load application settings
@@ -1347,26 +1430,24 @@ static CACHED_SETTINGS: StdMutex<Option<AppSettings>> = StdMutex::new(None);
 
 /// Get LLM provider from cached settings
 fn get_llm_provider() -> Result<llm::LlmProvider, String> {
-    let settings = CACHED_SETTINGS.lock()
-        .map_err(|_| "Failed to lock settings")?;
+    // First, try to get from cache
+    let mut cached = CACHED_SETTINGS.lock()
+        .map_err(|_| "Failed to lock settings while getting LLM provider")?;
 
-    let settings = settings.as_ref()
-        .or_else(|| {
-            // Try to load from disk
-            let path = get_settings_path();
-            if path.exists() {
-                std::fs::read_to_string(&path).ok()
-                    .and_then(|json| serde_json::from_str::<AppSettings>(&json).ok())
-                    .as_ref()
-                    .map(|_| ())
-            } else {
-                None
-            };
-            None
-        });
+    // If cache is empty, try to load from disk
+    if cached.is_none() {
+        let path = get_settings_path();
+        if path.exists() {
+            if let Ok(json) = std::fs::read_to_string(&path) {
+                if let Ok(loaded_settings) = serde_json::from_str::<AppSettings>(&json) {
+                    *cached = Some(loaded_settings);
+                }
+            }
+        }
+    }
 
-    // Use default config if no settings
-    let config = if let Some(s) = settings {
+    // Use settings if available, otherwise default config
+    let config = if let Some(s) = cached.as_ref() {
         let interrogator_config = &s.agent_config.interrogator;
         let api_key = match interrogator_config.provider.as_str() {
             "openai" => Some(s.api_keys.openai.clone()),
@@ -1387,6 +1468,7 @@ fn get_llm_provider() -> Result<llm::LlmProvider, String> {
             base_url: None,
             temperature: interrogator_config.temperature,
             max_tokens: 4096,
+            timeout_secs: 120,
         }
     } else {
         llm::LlmConfig::default()
@@ -1472,6 +1554,98 @@ struct ConversationMessage {
     role: String,
     content: String,
 }
+
+// =============================================================================
+// Threaded Messaging System - Agent Unblocker
+// =============================================================================
+
+/// Type of thread - determines the nature of the agent's request
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ThreadType {
+    #[serde(rename = "help_request")]
+    HelpRequest,
+    #[serde(rename = "clarification")]
+    Clarification,
+    #[serde(rename = "resource_needed")]
+    ResourceNeeded,
+    #[serde(rename = "approval_needed")]
+    ApprovalNeeded,
+}
+
+/// Current status of the thread
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum ThreadStatus {
+    #[serde(rename = "open")]
+    Open,
+    #[serde(rename = "resolved")]
+    Resolved,
+    #[serde(rename = "pending")]
+    Pending,
+}
+
+/// Priority level for thread handling
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub enum ThreadPriority {
+    #[serde(rename = "low")]
+    Low,
+    #[serde(rename = "medium")]
+    Medium,
+    #[serde(rename = "high")]
+    High,
+    #[serde(rename = "urgent")]
+    Urgent,
+}
+
+/// Resource attachment that can be shared in thread messages
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ThreadAttachment {
+    #[serde(rename = "type")]
+    pub attachment_type: String,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
+}
+
+/// Individual message within a thread
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ThreadMessage {
+    pub id: String,
+    pub thread_id: String,
+    pub role: String,  // "agent" or "human"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_name: Option<String>,
+    pub content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<ThreadAttachment>>,
+    pub timestamp_ms: u64,
+}
+
+/// A conversation thread - created by agents when blocked, resolved by humans
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Thread {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub thread_type: ThreadType,
+    pub status: ThreadStatus,
+    pub priority: ThreadPriority,
+    pub title: String,
+    pub agent_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at_ms: Option<u64>,
+    pub messages: Vec<ThreadMessage>,
+    pub is_blocking: bool,
+}
+
+/// Global thread storage for agent unblocker system
+static THREADS: Mutex<Vec<Thread>> = Mutex::new(Vec::new());
 
 /// Send a message to L1 and get a response
 /// P2-1: Now supports conversation history for multi-turn interactions
@@ -2070,7 +2244,7 @@ fn rlm_load_context(
     context_type: String,
 ) -> Result<serde_json::Value, String> {
     let store = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while setting context")?;
 
     let store = store.as_ref()
         .ok_or("RLM store not initialized. Call init_rlm_store first.")?;
@@ -2088,21 +2262,25 @@ fn rlm_load_context(
         s.load_variable(&var_name, content, ctx_type);
     }
 
-    // Log trajectory
+    // Log trajectory with memory estimate
     if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
         let step_num = traj.len();
+        let memory_estimate = length + std::mem::size_of::<String>() + 64;
         traj.push(RLMTrajectoryStep {
             step: step_num,
             operation: RLMOperation::LoadContext {
                 var_name: var_name.clone(),
                 length,
             },
-            description: format!("Loaded '{}' ({} chars)", var_name, length),
+            description: format!("Loaded '{}' ({} chars, ~{} bytes)", var_name, length, memory_estimate),
             data: None,
             timestamp_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: Some(memory_estimate),
+            error_context: None,
         });
     }
 
@@ -2121,7 +2299,7 @@ fn rlm_peek_context(
     end: usize,
 ) -> Result<String, String> {
     let store = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while peeking context")?;
 
     let store = store.as_ref()
         .ok_or("RLM store not initialized")?;
@@ -2133,9 +2311,10 @@ fn rlm_peek_context(
         return Err("Failed to lock store".to_string());
     };
 
-    // Log trajectory
+    // Log trajectory with memory estimate for slice
     if let Ok(mut traj) = RLM_TRAJECTORY.lock() {
         let step_num = traj.len();
+        let slice_len = result.len();
         traj.push(RLMTrajectoryStep {
             step: step_num,
             operation: RLMOperation::Peek {
@@ -2143,12 +2322,15 @@ fn rlm_peek_context(
                 start,
                 end,
             },
-            description: format!("Peeked '{}' [{}-{}]", var_name, start, end),
+            description: format!("Peeked '{}' [{}-{}] ({} chars)", var_name, start, end, slice_len),
             data: None,
             timestamp_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: Some(slice_len),
+            error_context: None,
         });
     }
 
@@ -2159,7 +2341,7 @@ fn rlm_peek_context(
 #[tauri::command]
 fn rlm_context_length(var_name: String) -> Result<usize, String> {
     let guard = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while getting context length")?;
 
     let shared_store = guard.as_ref()
         .ok_or("RLM store not initialized")?
@@ -2168,7 +2350,7 @@ fn rlm_context_length(var_name: String) -> Result<usize, String> {
     drop(guard);
 
     let inner = shared_store.lock()
-        .map_err(|_| "Failed to lock inner store")?;
+        .map_err(|_| "Failed to lock inner store while getting context length")?;
 
     inner.length(&var_name)
         .ok_or_else(|| format!("Context variable '{}' not found", var_name))
@@ -2181,7 +2363,7 @@ fn rlm_chunk_context(
     chunk_size: usize,
 ) -> Result<serde_json::Value, String> {
     let store = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while chunking context")?;
 
     let store = store.as_ref()
         .ok_or("RLM store not initialized")?;
@@ -2203,12 +2385,15 @@ fn rlm_chunk_context(
                 var_name: var_name.clone(),
                 num_chunks,
             },
-            description: format!("Chunked '{}' into {} pieces", var_name, num_chunks),
+            description: format!("Chunked '{}' into {} pieces (size {})", var_name, num_chunks, chunk_size),
             data: None,
             timestamp_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: None,
+            error_context: None,
         });
     }
 
@@ -2227,7 +2412,7 @@ fn rlm_regex_filter(
     pattern: String,
 ) -> Result<serde_json::Value, String> {
     let store = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while applying regex filter")?;
 
     let store = store.as_ref()
         .ok_or("RLM store not initialized")?;
@@ -2257,6 +2442,9 @@ fn rlm_regex_filter(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: None,
+            error_context: None,
         });
     }
 
@@ -2287,13 +2475,13 @@ async fn execute_rlm_atom(
     // Get context info from store
     let (context_length, context_preview) = {
         let guard = RLM_STORE.lock()
-            .map_err(|_| "Failed to acquire RLM store lock")?;
+            .map_err(|_| "Failed to acquire RLM store lock while executing RLM call")?;
         let shared_store = guard.as_ref()
             .ok_or("RLM store not initialized")?
             .clone();
         drop(guard);
         let inner = shared_store.lock()
-            .map_err(|_| "Failed to lock inner store")?;
+            .map_err(|_| "Failed to lock inner store while executing RLM call")?;
         let len = inner.length(&context_var).unwrap_or(0);
         let preview = inner.peek(&context_var, 0, 1000).unwrap_or_default();
         (len, preview)
@@ -2498,7 +2686,7 @@ async fn execute_rlm_atom(
 #[tauri::command]
 fn get_rlm_trajectory() -> Result<serde_json::Value, String> {
     let trajectory = RLM_TRAJECTORY.lock()
-        .map_err(|_| "Failed to acquire trajectory lock")?;
+        .map_err(|_| "Failed to acquire trajectory lock while getting RLM trajectory")?;
 
     serde_json::to_value(&*trajectory).map_err(|e| e.to_string())
 }
@@ -2516,7 +2704,7 @@ fn clear_rlm_trajectory() -> Result<String, String> {
 #[tauri::command]
 fn rlm_list_contexts() -> Result<serde_json::Value, String> {
     let store = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while listing contexts")?;
 
     let store = store.as_ref()
         .ok_or("RLM store not initialized")?;
@@ -2534,7 +2722,7 @@ fn rlm_list_contexts() -> Result<serde_json::Value, String> {
 #[tauri::command]
 fn rlm_clear_context(var_name: String) -> Result<bool, String> {
     let guard = RLM_STORE.lock()
-        .map_err(|_| "Failed to acquire RLM store lock")?;
+        .map_err(|_| "Failed to acquire RLM store lock while clearing context")?;
 
     let shared_store = guard.as_ref()
         .ok_or("RLM store not initialized")?
@@ -2543,9 +2731,30 @@ fn rlm_clear_context(var_name: String) -> Result<bool, String> {
     drop(guard);
 
     let mut inner = shared_store.lock()
-        .map_err(|_| "Failed to lock inner store")?;
+        .map_err(|_| "Failed to lock inner store while clearing context")?;
 
     Ok(inner.remove(&var_name).is_some())
+}
+
+/// HIGH-10: Clear all context variables from the RLM store
+/// Use this for cleanup after long-running operations to free memory
+#[tauri::command]
+fn rlm_clear_all() -> Result<usize, String> {
+    let guard = RLM_STORE.lock()
+        .map_err(|_| "Failed to acquire RLM store lock while clearing all contexts")?;
+
+    let shared_store = guard.as_ref()
+        .ok_or("RLM store not initialized")?
+        .clone();
+
+    drop(guard);
+
+    let mut inner = shared_store.lock()
+        .map_err(|_| "Failed to lock inner store while clearing all contexts")?;
+
+    let count = inner.list_variables().len();
+    inner.clear();
+    Ok(count)
 }
 
 /// Get RLM configuration
@@ -2619,14 +2828,16 @@ fn get_llm_config_from_settings() -> Result<LlmConfig, String> {
 /// Initialize a git repository in the workspace
 #[tauri::command]
 async fn git_init(workspace_path: String) -> Result<String, String> {
+    validation::validate_workspace_path(&workspace_path)?;
+
     let output = std::process::Command::new("git")
         .current_dir(&workspace_path)
         .args(["init"])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to initialize git repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to initialize git repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
     Ok("Repository initialized".to_string())
 }
@@ -2638,7 +2849,7 @@ async fn git_add_remote(workspace_path: String, name: String, url: String) -> Re
         .current_dir(&workspace_path)
         .args(["remote", "add", &name, &url])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to add remote '{}' with URL '{}': {}", name, url, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2651,7 +2862,7 @@ async fn git_add_remote(workspace_path: String, name: String, url: String) -> Re
                 .output();
             return Ok(format!("Remote '{}' updated to {}", name, url));
         }
-        return Err(stderr);
+        return Err(format!("Failed to add remote '{}' with URL '{}': {}", name, url, stderr));
     }
     Ok(format!("Remote '{}' added: {}", name, url))
 }
@@ -2663,10 +2874,10 @@ async fn git_get_remotes(workspace_path: String) -> Result<serde_json::Value, St
         .current_dir(&workspace_path)
         .args(["remote", "-v"])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to get remotes for repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to get remotes for repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
 
     let remotes: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
@@ -2700,10 +2911,10 @@ async fn git_push(workspace_path: String, remote: String, branch: String, set_up
         .current_dir(&workspace_path)
         .args(&args)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to push to '{}/{}': {}", remote, branch, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to push to '{}/{}': {}", remote, branch, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(format!("Pushed to {}/{}", remote, branch))
 }
@@ -2715,10 +2926,10 @@ async fn git_current_branch(workspace_path: String) -> Result<String, String> {
         .current_dir(&workspace_path)
         .args(["branch", "--show-current"])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to get current branch for repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to get current branch for repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -2730,10 +2941,10 @@ async fn git_status(workspace_path: String) -> Result<serde_json::Value, String>
         .current_dir(&workspace_path)
         .args(["status", "--porcelain"])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to get status for repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to get status for repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
 
     let changes: Vec<serde_json::Value> = String::from_utf8_lossy(&output.stdout)
@@ -2764,13 +2975,16 @@ async fn git_status(workspace_path: String) -> Result<serde_json::Value, String>
 /// Clone a repository
 #[tauri::command]
 async fn git_clone(url: String, target_path: String) -> Result<String, String> {
+    validation::validate_non_empty(&url, "Repository URL")?;
+    validation::validate_file_path(&target_path)?;
+
     let output = std::process::Command::new("git")
         .args(["clone", &url, &target_path])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to clone '{}' to '{}': {}", url, target_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to clone '{}' to '{}': {}", url, target_path, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(format!("Cloned {} to {}", url, target_path))
 }
@@ -2786,10 +3000,10 @@ async fn git_add(workspace_path: String, paths: Vec<String>) -> Result<String, S
         .current_dir(&workspace_path)
         .args(&args)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to stage files in '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to stage files in '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(format!("Staged {} files", paths.len()))
 }
@@ -2797,11 +3011,12 @@ async fn git_add(workspace_path: String, paths: Vec<String>) -> Result<String, S
 /// Commit staged changes
 #[tauri::command]
 async fn git_commit(workspace_path: String, message: String) -> Result<serde_json::Value, String> {
+    let truncated_msg = if message.len() > 50 { format!("{}...", &message[..50]) } else { message.clone() };
     let output = std::process::Command::new("git")
         .current_dir(&workspace_path)
         .args(["commit", "-m", &message])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to commit with message '{}': {}", truncated_msg, e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2812,7 +3027,7 @@ async fn git_commit(workspace_path: String, message: String) -> Result<serde_jso
                 "message": "Nothing to commit"
             }));
         }
-        return Err(stderr);
+        return Err(format!("Failed to commit with message '{}': {}", truncated_msg, stderr));
     }
 
     // Get the commit hash
@@ -2840,14 +3055,15 @@ async fn git_branch(workspace_path: String, branch_name: String, create: bool) -
         vec!["checkout", &branch_name]
     };
 
+    let action = if create { "create and switch to" } else { "switch to" };
     let output = std::process::Command::new("git")
         .current_dir(&workspace_path)
         .args(&args)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to {} branch '{}': {}", action, branch_name, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to {} branch '{}': {}", action, branch_name, String::from_utf8_lossy(&output.stderr)));
     }
 
     if create {
@@ -2864,10 +3080,10 @@ async fn git_list_branches(workspace_path: String) -> Result<serde_json::Value, 
         .current_dir(&workspace_path)
         .args(["branch", "-a", "--format=%(refname:short)|%(objectname:short)|%(upstream:short)"])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to list branches for repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to list branches for repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -2889,6 +3105,7 @@ async fn git_list_branches(workspace_path: String) -> Result<serde_json::Value, 
         .current_dir(&workspace_path)
         .args(["branch", "--show-current"])
         .output()
+        .map_err(|e| eprintln!("Warning: Failed to get current git branch: {}", e))
         .ok()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
@@ -2911,10 +3128,10 @@ async fn git_pull(workspace_path: String, remote: String, branch: String, rebase
         .current_dir(&workspace_path)
         .args(&args)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to pull from '{}/{}': {}", remote, branch, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to pull from '{}/{}': {}", remote, branch, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -2931,14 +3148,15 @@ async fn git_diff(workspace_path: String, staged: bool, file_path: Option<String
         args.push(path);
     }
 
+    let diff_target = file_path.as_ref().map(|p| format!(" for file '{}'", p)).unwrap_or_default();
     let output = std::process::Command::new("git")
         .current_dir(&workspace_path)
         .args(&args)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to get diff{} in '{}': {}", diff_target, workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to get diff{} in '{}': {}", diff_target, workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
@@ -2951,10 +3169,10 @@ async fn git_log(workspace_path: String, count: Option<usize>) -> Result<serde_j
         .current_dir(&workspace_path)
         .args(["log", "--format=%H|%s|%an|%ae|%aI", "-n", &count_str])
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| format!("Failed to get commit log for repository at '{}': {}", workspace_path, e))?;
 
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).to_string());
+        return Err(format!("Failed to get commit log for repository at '{}': {}", workspace_path, String::from_utf8_lossy(&output.stderr)));
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -3408,7 +3626,7 @@ async fn extract_content(
 
 /// Initialize or get the knowledge base
 fn get_or_init_kb() -> Result<(), String> {
-    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while initializing KB")?;
     if guard.is_none() {
         *guard = Some(knowledge_base::KnowledgeBase::new());
     }
@@ -3419,7 +3637,7 @@ fn get_or_init_kb() -> Result<(), String> {
 #[tauri::command]
 fn kb_add_document(name: String, content: String, doc_type: String) -> Result<String, String> {
     get_or_init_kb()?;
-    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while adding document")?;
     let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
     let parsed_type = knowledge_base::DocumentType::from_str(&doc_type);
     let id = kb.add_document(name, content, parsed_type);
@@ -3430,7 +3648,7 @@ fn kb_add_document(name: String, content: String, doc_type: String) -> Result<St
 #[tauri::command]
 fn kb_add_document_auto(name: String, content: String) -> Result<serde_json::Value, String> {
     get_or_init_kb()?;
-    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while adding document with auto-classification")?;
     let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
     let (id, doc_type) = kb.add_document_auto(name, content);
     Ok(serde_json::json!({
@@ -3451,7 +3669,7 @@ fn kb_classify_document(content: String, filename: String) -> Result<String, Str
 #[tauri::command]
 fn kb_add_web_research(url: String, title: String, content: String) -> Result<String, String> {
     get_or_init_kb()?;
-    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while adding web research")?;
     let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
     let id = kb.add_web_research(url, title, content);
     Ok(id)
@@ -3461,7 +3679,7 @@ fn kb_add_web_research(url: String, title: String, content: String) -> Result<St
 #[tauri::command]
 fn kb_remove_document(id: String) -> Result<(), String> {
     get_or_init_kb()?;
-    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let mut guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while removing document")?;
     let kb = guard.as_mut().ok_or("Knowledge base not initialized")?;
     if kb.remove_document(&id) {
         Ok(())
@@ -3474,7 +3692,7 @@ fn kb_remove_document(id: String) -> Result<(), String> {
 #[tauri::command]
 fn kb_get_documents() -> Result<Vec<knowledge_base::KnowledgeDocument>, String> {
     get_or_init_kb()?;
-    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while getting documents")?;
     let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
     Ok(kb.get_all_documents().clone())
 }
@@ -3483,7 +3701,7 @@ fn kb_get_documents() -> Result<Vec<knowledge_base::KnowledgeDocument>, String> 
 #[tauri::command]
 fn kb_compile_context() -> Result<String, String> {
     get_or_init_kb()?;
-    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while compiling context")?;
     let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
     Ok(kb.compile_context())
 }
@@ -3492,7 +3710,7 @@ fn kb_compile_context() -> Result<String, String> {
 #[tauri::command]
 fn kb_compile_context_with_budget(max_tokens: usize) -> Result<String, String> {
     get_or_init_kb()?;
-    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while compiling context with budget")?;
     let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
     Ok(kb.compile_context_with_budget(Some(max_tokens)))
 }
@@ -3501,7 +3719,7 @@ fn kb_compile_context_with_budget(max_tokens: usize) -> Result<String, String> {
 #[tauri::command]
 fn kb_compile_for_interrogator() -> Result<String, String> {
     get_or_init_kb()?;
-    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while compiling for interrogator")?;
     let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
     Ok(kb.compile_for_interrogator())
 }
@@ -3510,7 +3728,7 @@ fn kb_compile_for_interrogator() -> Result<String, String> {
 #[tauri::command]
 fn kb_get_stats() -> Result<serde_json::Value, String> {
     get_or_init_kb()?;
-    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock")?;
+    let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire knowledge base lock while getting stats")?;
     let kb = guard.as_ref().ok_or("Knowledge base not initialized")?;
 
     Ok(serde_json::json!({
@@ -3587,7 +3805,7 @@ fn save_session(
 
     // Get KB documents
     let kb_documents = {
-        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock")?;
+        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock while saving session")?;
         if let Some(kb) = guard.as_ref() {
             kb.documents.iter()
                 .map(|doc| serde_json::json!({
@@ -3658,7 +3876,7 @@ fn update_session(
 
     // Update KB documents
     session.kb_documents = {
-        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock")?;
+        let guard = KNOWLEDGE_BASE.lock().map_err(|_| "Failed to acquire KB lock while restoring session")?;
         if let Some(kb) = guard.as_ref() {
             kb.documents.iter()
                 .map(|doc| serde_json::json!({
@@ -3750,6 +3968,165 @@ fn delete_session(session_id: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to delete session file: {}", e))?;
 
     Ok(())
+}
+
+// =============================================================================
+// Thread Management Commands - Agent Unblocker System
+// =============================================================================
+
+/// Create a new thread (called by agent when blocked)
+#[tauri::command]
+fn create_thread(
+    thread_type: ThreadType,
+    priority: ThreadPriority,
+    title: String,
+    agent_name: String,
+    initial_message: String,
+    task_id: Option<String>,
+    is_blocking: bool,
+) -> Result<Thread, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let thread_id = format!("thread_{}", timestamp);
+    let message_id = format!("msg_{}", timestamp);
+
+    let initial_msg = ThreadMessage {
+        id: message_id,
+        thread_id: thread_id.clone(),
+        role: "agent".to_string(),
+        agent_name: Some(agent_name.clone()),
+        content: initial_message,
+        attachments: None,
+        timestamp_ms: timestamp,
+    };
+
+    let thread = Thread {
+        id: thread_id,
+        thread_type,
+        status: ThreadStatus::Open,
+        priority,
+        title,
+        agent_name,
+        task_id,
+        created_at_ms: timestamp,
+        updated_at_ms: timestamp,
+        resolved_at_ms: None,
+        messages: vec![initial_msg],
+        is_blocking,
+    };
+
+    let mut threads = THREADS.lock().map_err(|e| e.to_string())?;
+    threads.push(thread.clone());
+
+    Ok(thread)
+}
+
+/// List all threads with optional status filter
+#[tauri::command]
+fn list_threads(status_filter: Option<String>) -> Result<Vec<Thread>, String> {
+    let threads = THREADS.lock().map_err(|e| e.to_string())?;
+
+    let filtered: Vec<Thread> = if let Some(status) = status_filter {
+        threads.iter()
+            .filter(|t| match &t.status {
+                ThreadStatus::Open => status == "open",
+                ThreadStatus::Resolved => status == "resolved",
+                ThreadStatus::Pending => status == "pending",
+            })
+            .cloned()
+            .collect()
+    } else {
+        threads.clone()
+    };
+
+    Ok(filtered)
+}
+
+/// Get a single thread by ID
+#[tauri::command]
+fn get_thread(thread_id: String) -> Result<Thread, String> {
+    let threads = THREADS.lock().map_err(|e| e.to_string())?;
+    threads.iter()
+        .find(|t| t.id == thread_id)
+        .cloned()
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))
+}
+
+/// Reply to a thread (called by human)
+#[tauri::command]
+fn reply_to_thread(
+    thread_id: String,
+    content: String,
+    attachments: Option<Vec<ThreadAttachment>>,
+    resolve: bool,
+) -> Result<Thread, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut threads = THREADS.lock().map_err(|e| e.to_string())?;
+    let thread = threads.iter_mut()
+        .find(|t| t.id == thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    let message = ThreadMessage {
+        id: format!("msg_{}", timestamp),
+        thread_id: thread_id.clone(),
+        role: "human".to_string(),
+        agent_name: None,
+        content,
+        attachments,
+        timestamp_ms: timestamp,
+    };
+
+    thread.messages.push(message);
+    thread.updated_at_ms = timestamp;
+    thread.is_blocking = false; // Human responded, agent unblocked
+
+    if resolve {
+        thread.status = ThreadStatus::Resolved;
+        thread.resolved_at_ms = Some(timestamp);
+    } else {
+        thread.status = ThreadStatus::Pending;
+    }
+
+    Ok(thread.clone())
+}
+
+/// Resolve a thread
+#[tauri::command]
+fn resolve_thread(thread_id: String) -> Result<Thread, String> {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let mut threads = THREADS.lock().map_err(|e| e.to_string())?;
+    let thread = threads.iter_mut()
+        .find(|t| t.id == thread_id)
+        .ok_or_else(|| format!("Thread not found: {}", thread_id))?;
+
+    thread.status = ThreadStatus::Resolved;
+    thread.resolved_at_ms = Some(timestamp);
+    thread.updated_at_ms = timestamp;
+    thread.is_blocking = false;
+
+    Ok(thread.clone())
+}
+
+/// Get all threads that are currently blocking agents
+#[tauri::command]
+fn get_blocking_threads() -> Result<Vec<Thread>, String> {
+    let threads = THREADS.lock().map_err(|e| e.to_string())?;
+    let blocking: Vec<Thread> = threads.iter()
+        .filter(|t| t.is_blocking)
+        .cloned()
+        .collect();
+    Ok(blocking)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3850,6 +4227,7 @@ pub fn run() {
             clear_rlm_trajectory,
             rlm_list_contexts,
             rlm_clear_context,
+            rlm_clear_all,
             get_rlm_config,
             should_use_rlm,
             // Crawl4AI commands
@@ -3897,7 +4275,14 @@ pub fn run() {
             update_session,
             load_session,
             list_sessions,
-            delete_session
+            delete_session,
+            // Thread Management commands (Agent Unblocker)
+            create_thread,
+            list_threads,
+            get_thread,
+            reply_to_thread,
+            resolve_thread,
+            get_blocking_threads
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

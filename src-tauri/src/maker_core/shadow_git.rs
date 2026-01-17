@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
+/// Maximum number of snapshots to prevent unbounded memory growth
+const MAX_SNAPSHOTS: usize = 100;
 
 /// Snapshot metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,18 +27,64 @@ pub struct ShadowGit {
     repo: Option<gix::Repository>,
 }
 
+/// HIGH-14: Snapshot state for persistence
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SnapshotState {
+    snapshots: Vec<Snapshot>,
+    current_snapshot_idx: Option<usize>,
+}
+
 impl ShadowGit {
     /// Create a new ShadowGit instance
+    /// HIGH-14: Automatically loads persisted snapshots if available
     pub fn new(workspace_path: &str) -> Self {
         let path = PathBuf::from(workspace_path);
         let repo = gix::open(&path).ok();
-        
+
+        // HIGH-14: Try to load persisted snapshot state
+        let (snapshots, current_snapshot_idx) = Self::load_snapshot_state_from_path(&path)
+            .map(|state| (state.snapshots, state.current_snapshot_idx))
+            .unwrap_or_else(|_| (Vec::new(), None));
+
         Self {
             workspace_path: path,
-            snapshots: Vec::new(),
-            current_snapshot_idx: None,
+            snapshots,
+            current_snapshot_idx,
             repo,
         }
+    }
+
+    /// HIGH-14: Get the path to the snapshot state file
+    fn snapshot_state_path(&self) -> PathBuf {
+        self.workspace_path.join(".maker").join("snapshots.json")
+    }
+
+    /// HIGH-14: Load snapshot state from a path
+    fn load_snapshot_state_from_path(workspace_path: &PathBuf) -> Result<SnapshotState> {
+        let state_path = workspace_path.join(".maker").join("snapshots.json");
+        let content = std::fs::read_to_string(&state_path)?;
+        let state: SnapshotState = serde_json::from_str(&content)?;
+        Ok(state)
+    }
+
+    /// HIGH-14: Persist snapshot state to disk
+    pub fn persist_snapshots(&self) -> Result<()> {
+        let state = SnapshotState {
+            snapshots: self.snapshots.clone(),
+            current_snapshot_idx: self.current_snapshot_idx,
+        };
+
+        let state_path = self.snapshot_state_path();
+
+        // Ensure .maker directory exists
+        if let Some(parent) = state_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let content = serde_json::to_string_pretty(&state)?;
+        std::fs::write(&state_path, content)?;
+
+        Ok(())
     }
 
     /// Initialize or open the repository
@@ -60,14 +107,29 @@ impl ShadowGit {
 
     /// Create a snapshot of the current state
     /// PRD 5.1: "Before any Rhai script touches disk, gitoxide creates a blob"
+    /// HIGH-14: Now persists snapshot state after creation
+    /// Enforces MAX_SNAPSHOTS limit by removing oldest snapshots when exceeded
     pub fn snapshot(&mut self, message: &str) -> Result<Snapshot> {
+        // Enforce max snapshots limit by removing oldest when limit is reached
+        while self.snapshots.len() >= MAX_SNAPSHOTS {
+            self.snapshots.remove(0);
+            // Adjust current_snapshot_idx after removal
+            if let Some(idx) = self.current_snapshot_idx {
+                if idx > 0 {
+                    self.current_snapshot_idx = Some(idx - 1);
+                } else {
+                    self.current_snapshot_idx = None;
+                }
+            }
+        }
+
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        
+
         let id = format!("snap_{}", timestamp);
-        
+
         let commit_hash = if self.repo.is_some() {
             // Stage all changes and create a commit
             self.stage_all()?;
@@ -88,6 +150,11 @@ impl ShadowGit {
 
         self.snapshots.push(snapshot.clone());
         self.current_snapshot_idx = Some(self.snapshots.len() - 1);
+
+        // HIGH-14: Persist snapshot state to disk
+        if let Err(e) = self.persist_snapshots() {
+            eprintln!("Warning: Failed to persist snapshot state: {}", e);
+        }
 
         Ok(snapshot)
     }
@@ -152,9 +219,18 @@ impl ShadowGit {
 
     /// Rollback to the previous snapshot
     /// PRD 5.1: "gitoxide reverts the index to the snapshot instantly"
+    /// HIGH-12: Added workspace verification before rollback
     pub fn rollback(&mut self) -> Result<()> {
         if self.snapshots.len() < 2 {
             return Err(anyhow!("No previous snapshot to rollback to"));
+        }
+
+        // HIGH-12: Verify workspace still exists and is accessible
+        if !self.workspace_path.exists() {
+            return Err(anyhow!("Workspace path no longer exists: {:?}", self.workspace_path));
+        }
+        if !self.workspace_path.is_dir() {
+            return Err(anyhow!("Workspace path is not a directory: {:?}", self.workspace_path));
         }
 
         // Get the previous snapshot
@@ -169,11 +245,25 @@ impl ShadowGit {
         self.snapshots.pop();
         self.current_snapshot_idx = Some(prev_idx);
 
+        // HIGH-14: Persist snapshot state after rollback
+        if let Err(e) = self.persist_snapshots() {
+            eprintln!("Warning: Failed to persist snapshot state after rollback: {}", e);
+        }
+
         Ok(())
     }
 
     /// Rollback to a specific snapshot by ID
+    /// HIGH-12: Added workspace verification before rollback
     pub fn rollback_to(&mut self, snapshot_id: &str) -> Result<()> {
+        // HIGH-12: Verify workspace still exists and is accessible
+        if !self.workspace_path.exists() {
+            return Err(anyhow!("Workspace path no longer exists: {:?}", self.workspace_path));
+        }
+        if !self.workspace_path.is_dir() {
+            return Err(anyhow!("Workspace path is not a directory: {:?}", self.workspace_path));
+        }
+
         let idx = self.snapshots.iter().position(|s| s.id == snapshot_id)
             .ok_or_else(|| anyhow!("Snapshot not found: {}", snapshot_id))?;
 
@@ -186,6 +276,11 @@ impl ShadowGit {
         // Truncate snapshots after this point
         self.snapshots.truncate(idx + 1);
         self.current_snapshot_idx = Some(idx);
+
+        // HIGH-14: Persist snapshot state after rollback
+        if let Err(e) = self.persist_snapshots() {
+            eprintln!("Warning: Failed to persist snapshot state after rollback: {}", e);
+        }
 
         Ok(())
     }
@@ -451,6 +546,7 @@ impl ShadowGit {
 
     /// Squash all snapshots into a single commit
     /// PRD 5.1: "Only when PLAN.md is marked Complete does Shadow Repo squash"
+    /// HIGH-13: Improved error handling for soft reset failures
     pub fn squash(&mut self, final_message: &str) -> Result<String> {
         if self.snapshots.is_empty() {
             return Err(anyhow!("No snapshots to squash"));
@@ -468,10 +564,19 @@ impl ShadowGit {
 
             if parent_output.status.success() {
                 let parent_hash = String::from_utf8_lossy(&parent_output.stdout).trim().to_string();
-                let _ = std::process::Command::new("git")
+                // HIGH-13: Check soft reset result and handle failure
+                let reset_output = std::process::Command::new("git")
                     .current_dir(&self.workspace_path)
                     .args(["reset", "--soft", &parent_hash])
                     .output()?;
+
+                if !reset_output.status.success() {
+                    let stderr = String::from_utf8_lossy(&reset_output.stderr);
+                    return Err(anyhow!("Soft reset failed during squash: {}", stderr));
+                }
+            } else {
+                // No parent commit (first commit in repo) - proceed without reset
+                eprintln!("Warning: No parent commit found for squash, proceeding with current state");
             }
         }
 
@@ -482,6 +587,11 @@ impl ShadowGit {
         // Clear snapshots
         self.snapshots.clear();
         self.current_snapshot_idx = None;
+
+        // HIGH-14: Persist snapshot state after squash
+        if let Err(e) = self.persist_snapshots() {
+            eprintln!("Warning: Failed to persist snapshot state after squash: {}", e);
+        }
 
         Ok(hash)
     }

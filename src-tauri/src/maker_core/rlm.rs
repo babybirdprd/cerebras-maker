@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+/// Maximum number of context entries to prevent unbounded memory growth
+const MAX_CONTEXT_ENTRIES: usize = 50;
+
 /// RLM Context Variable Store
 /// Holds large contexts as environment variables that can be programmatically accessed
 #[derive(Debug, Clone, Default)]
@@ -108,6 +111,15 @@ pub struct RLMTrajectoryStep {
     pub data: Option<serde_json::Value>,
     /// Timestamp (ms since start)
     pub timestamp_ms: u64,
+    /// Duration of this operation in milliseconds
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
+    /// Estimated memory usage in bytes (for context operations)
+    #[serde(default)]
+    pub memory_estimate_bytes: Option<usize>,
+    /// Error context if operation failed
+    #[serde(default)]
+    pub error_context: Option<String>,
 }
 
 /// Types of RLM operations for trajectory tracking
@@ -139,7 +151,22 @@ impl RLMContextStore {
     }
 
     /// Load a context variable into the store
+    /// Enforces MAX_CONTEXT_ENTRIES limit by removing oldest entries when exceeded
     pub fn load_variable(&mut self, name: &str, content: String, context_type: ContextType) {
+        // Enforce max entries limit before adding new entry
+        // If we're at the limit and adding a new key (not updating), remove oldest
+        if !self.variables.contains_key(name) && self.variables.len() >= MAX_CONTEXT_ENTRIES {
+            // Find and remove the oldest entry by created_at timestamp
+            if let Some(oldest_key) = self.metadata
+                .iter()
+                .min_by_key(|(_, meta)| meta.created_at)
+                .map(|(key, _)| key.clone())
+            {
+                self.variables.remove(&oldest_key);
+                self.metadata.remove(&oldest_key);
+            }
+        }
+
         let length = content.len();
         let metadata = ContextMetadata {
             total_length: length,
@@ -429,6 +456,44 @@ impl RLMExecutionState {
             description,
             data,
             timestamp_ms: self.start_time.elapsed().as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: None,
+            error_context: None,
+        });
+    }
+
+    /// Add a trajectory step with duration tracking
+    pub fn add_step_with_duration(
+        &mut self,
+        operation: RLMOperation,
+        description: String,
+        data: Option<serde_json::Value>,
+        duration_ms: u64,
+        memory_estimate_bytes: Option<usize>,
+    ) {
+        self.trajectory.push(RLMTrajectoryStep {
+            step: self.trajectory.len(),
+            operation,
+            description,
+            data,
+            timestamp_ms: self.start_time.elapsed().as_millis() as u64,
+            duration_ms: Some(duration_ms),
+            memory_estimate_bytes,
+            error_context: None,
+        });
+    }
+
+    /// Add an error trajectory step
+    pub fn add_error_step(&mut self, message: String, error_context: String) {
+        self.trajectory.push(RLMTrajectoryStep {
+            step: self.trajectory.len(),
+            operation: RLMOperation::Error { message: message.clone() },
+            description: format!("Error: {}", message),
+            data: None,
+            timestamp_ms: self.start_time.elapsed().as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: None,
+            error_context: Some(error_context),
         });
     }
 
@@ -623,6 +688,9 @@ mod tests {
                 description: "Started".to_string(),
                 data: None,
                 timestamp_ms: 0,
+                duration_ms: Some(10),
+                memory_estimate_bytes: None,
+                error_context: None,
             },
         ];
 
@@ -701,6 +769,9 @@ mod tests {
                 description: format!("Step {}", i),
                 data: None,
                 timestamp_ms: i as u64 * 100,
+                duration_ms: Some(i as u64 * 10),
+                memory_estimate_bytes: Some(i * 100),
+                error_context: None,
             }
         }).collect();
 
@@ -1037,6 +1108,7 @@ pub fn helper_function_{fn_num}_module_{file_num}(
 
         // Step 1: Load context
         println!("Step 1: Loading codebase into RLM store...");
+        let load_start = Instant::now();
         store.load_variable("codebase", codebase, ContextType::MiniCodebase);
         trajectory.push(RLMTrajectoryStep {
             step: 1,
@@ -1047,6 +1119,9 @@ pub fn helper_function_{fn_num}_module_{file_num}(
             description: format!("Loaded {} byte codebase", total_size),
             data: None,
             timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+            duration_ms: Some(load_start.elapsed().as_millis() as u64),
+            memory_estimate_bytes: Some(total_size),
+            error_context: None,
         });
 
         // Step 2: Check if RLM mode is needed
@@ -1057,6 +1132,7 @@ pub fn helper_function_{fn_num}_module_{file_num}(
 
         // Step 3: Chunk the content
         println!("Step 3: Chunking codebase into {} char pieces...", config.default_chunk_size);
+        let chunk_start = Instant::now();
         let chunks = store.chunk("codebase", config.default_chunk_size);
         trajectory.push(RLMTrajectoryStep {
             step: 2,
@@ -1067,11 +1143,15 @@ pub fn helper_function_{fn_num}_module_{file_num}(
             description: format!("Created {} chunks", chunks.len()),
             data: None,
             timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+            duration_ms: Some(chunk_start.elapsed().as_millis() as u64),
+            memory_estimate_bytes: None,
+            error_context: None,
         });
         println!("  - Created {} chunks", chunks.len());
 
         // Step 4: Apply regex filter to find relevant sections
         println!("Step 4: Filtering for struct definitions...");
+        let regex_start = Instant::now();
         let structs = store.regex_filter("codebase", r"^pub struct ").unwrap();
         trajectory.push(RLMTrajectoryStep {
             step: 3,
@@ -1083,11 +1163,15 @@ pub fn helper_function_{fn_num}_module_{file_num}(
             description: format!("Found {} struct definitions", structs.len()),
             data: None,
             timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+            duration_ms: Some(regex_start.elapsed().as_millis() as u64),
+            memory_estimate_bytes: None,
+            error_context: None,
         });
         println!("  - Found {} structs", structs.len());
 
         // Step 5: Peek at specific sections
         println!("Step 5: Peeking at first chunk for analysis...");
+        let peek_start = Instant::now();
         let peek_content = store.peek("codebase", 0, 5000).unwrap();
         trajectory.push(RLMTrajectoryStep {
             step: 4,
@@ -1099,6 +1183,9 @@ pub fn helper_function_{fn_num}_module_{file_num}(
             description: "Peeked at first 5000 chars".to_string(),
             data: None,
             timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+            duration_ms: Some(peek_start.elapsed().as_millis() as u64),
+            memory_estimate_bytes: Some(peek_content.len()),
+            error_context: None,
         });
         println!("  - Retrieved {} chars", peek_content.len());
 
@@ -1117,6 +1204,9 @@ pub fn helper_function_{fn_num}_module_{file_num}(
                 description: format!("Sub-query for chunk {}", i),
                 data: None,
                 timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+                duration_ms: None,
+                memory_estimate_bytes: None,
+                error_context: None,
             });
 
             // Simulate result
@@ -1128,6 +1218,9 @@ pub fn helper_function_{fn_num}_module_{file_num}(
                 description: format!("Got result for chunk {}", i),
                 data: None,
                 timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+                duration_ms: Some(1), // Simulated duration
+                memory_estimate_bytes: None,
+                error_context: None,
             });
             sub_call_count += 1;
         }
@@ -1147,6 +1240,9 @@ pub fn helper_function_{fn_num}_module_{file_num}(
             description: "RLM execution complete".to_string(),
             data: None,
             timestamp_ms: workflow_start.elapsed().as_millis() as u64,
+            duration_ms: None,
+            memory_estimate_bytes: None,
+            error_context: None,
         });
 
         let total_time = workflow_start.elapsed();

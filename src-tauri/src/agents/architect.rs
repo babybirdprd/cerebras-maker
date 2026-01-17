@@ -78,6 +78,14 @@ impl Architect {
 
     /// Decompose requirements into a plan using LLM
     pub async fn decompose(&self, requirements: &str, context: &AgentContext) -> Result<DecompositionResult, String> {
+        // HIGH-3: Validate input before processing
+        if requirements.trim().is_empty() {
+            return Err("Requirements cannot be empty".to_string());
+        }
+        if context.workspace_path.is_empty() {
+            return Err("Workspace path must be provided in context".to_string());
+        }
+
         // Build the user prompt with context
         let user_prompt = self.build_user_prompt(requirements, context);
 

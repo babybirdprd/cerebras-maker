@@ -79,6 +79,13 @@ impl CodeModeRuntime {
     /// Create a new Code Mode Runtime with custom LLM and RLM config
     pub fn with_full_config(workspace_path: &str, llm_config: LlmConfig, rlm_config: RLMConfig) -> Result<Self, Box<EvalAltResult>> {
         let mut engine = Engine::new();
+
+        // CRIT-3: Add resource limits to prevent DoS via infinite loops
+        engine.set_max_operations(100_000);  // Limit total operations
+        engine.set_max_modules(10);          // Limit module imports
+        engine.set_max_call_levels(32);      // Limit recursion depth
+        engine.set_max_expr_depths(64, 64);  // Limit expression nesting
+
         let shadow_git = Arc::new(Mutex::new(ShadowGit::new(workspace_path)));
         let execution_log = Arc::new(Mutex::new(Vec::new()));
         let llm_config = Arc::new(llm_config);
@@ -87,7 +94,11 @@ impl CodeModeRuntime {
 
         // Initialize the atom worker pool for safe async-to-sync bridging
         // This creates a dedicated runtime thread that handles all atom executions
-        super::atom_bridge::init_atom_pool(llm_config.clone());
+        super::atom_bridge::init_atom_pool(llm_config.clone())
+            .map_err(|e| Box::new(EvalAltResult::ErrorSystem(
+                "Atom pool initialization failed".into(),
+                Box::new(std::io::Error::new(std::io::ErrorKind::Other, e))
+            )))?;
 
         // Register MAKER API functions (including RLM functions)
         Self::register_api(
@@ -226,6 +237,16 @@ impl CodeModeRuntime {
             }
         });
 
+        // CRIT-4: Register rand() function for RLM voting
+        // Used by voting.rhai for random selection in consensus
+        engine.register_fn("rand", |max: i64| -> i64 {
+            if max <= 0 {
+                0
+            } else {
+                fastrand::i64(0..max)
+            }
+        });
+
         // =======================================================================
         // RLM (Recursive Language Model) API Functions
         // Based on: "Recursive Language Models: Scaling Context with Recursive Prompt Decomposition"
@@ -236,18 +257,26 @@ impl CodeModeRuntime {
         let traj_load = rlm_trajectory.clone();
         let log_load = log.clone();
         engine.register_fn("load_context_var", move |name: &str, content: &str| -> bool {
+            let op_start = std::time::Instant::now();
             if let Ok(mut store) = store_load.lock() {
+                let content_len = content.len();
+                // Estimate memory: content bytes + string overhead + hashmap entry overhead
+                let memory_estimate = content_len + std::mem::size_of::<String>() + 64;
                 store.load_variable(name, content.to_string(), ContextType::String);
+                let duration_ms = op_start.elapsed().as_millis() as u64;
 
-                // Log the operation
-                Self::log_rlm_trajectory(&traj_load, RLMOperation::LoadContext {
+                // Log the operation with duration and memory estimate
+                Self::log_rlm_trajectory_with_memory(&traj_load, RLMOperation::LoadContext {
                     var_name: name.to_string(),
-                    length: content.len(),
-                });
+                    length: content_len,
+                }, duration_ms, memory_estimate);
                 Self::log_event(&log_load, ExecutionEventType::RLMLoadContext,
-                    &format!("Loaded context '{}' ({} chars)", name, content.len()), None);
+                    &format!("Loaded context '{}' ({} chars, ~{} bytes, {}ms)", name, content_len, memory_estimate, duration_ms), None);
                 true
             } else {
+                Self::log_rlm_trajectory_error(&traj_load,
+                    "Failed to acquire context store lock".to_string(),
+                    format!("Attempted to load context '{}'", name));
                 false
             }
         });
@@ -257,24 +286,35 @@ impl CodeModeRuntime {
         let traj_peek = rlm_trajectory.clone();
         let log_peek = log.clone();
         engine.register_fn("peek_context", move |var_name: &str, start: i64, end: i64| -> Dynamic {
+            let op_start = std::time::Instant::now();
             if let Ok(store) = store_peek.lock() {
                 let start_usize = start.max(0) as usize;
                 let end_usize = end.max(0) as usize;
 
                 match store.peek(var_name, start_usize, end_usize) {
                     Some(slice) => {
-                        Self::log_rlm_trajectory(&traj_peek, RLMOperation::Peek {
+                        let slice_len = slice.len();
+                        let duration_ms = op_start.elapsed().as_millis() as u64;
+                        Self::log_rlm_trajectory_with_memory(&traj_peek, RLMOperation::Peek {
                             var_name: var_name.to_string(),
                             start: start_usize,
                             end: end_usize,
-                        });
+                        }, duration_ms, slice_len);
                         Self::log_event(&log_peek, ExecutionEventType::RLMPeek,
-                            &format!("Peeked '{}' [{}-{}]", var_name, start, end), None);
+                            &format!("Peeked '{}' [{}-{}] ({} chars, {}ms)", var_name, start, end, slice_len, duration_ms), None);
                         Dynamic::from(slice)
                     }
-                    None => Dynamic::UNIT,
+                    None => {
+                        Self::log_rlm_trajectory_error(&traj_peek,
+                            format!("Peek failed: variable '{}' not found or range invalid", var_name),
+                            format!("Attempted peek on '{}' [{}-{}]", var_name, start, end));
+                        Dynamic::UNIT
+                    }
                 }
             } else {
+                Self::log_rlm_trajectory_error(&traj_peek,
+                    "Failed to acquire context store lock".to_string(),
+                    format!("Attempted to peek context '{}'", var_name));
                 Dynamic::UNIT
             }
         });
@@ -295,20 +335,25 @@ impl CodeModeRuntime {
         let log_chunk = log.clone();
         let default_chunk_size = rlm_config.default_chunk_size;
         engine.register_fn("chunk_context", move |var_name: &str, chunk_size: i64| -> rhai::Array {
+            let op_start = std::time::Instant::now();
             if let Ok(mut store) = store_chunk.lock() {
                 let size = if chunk_size <= 0 { default_chunk_size } else { chunk_size as usize };
                 let chunks = store.chunk(var_name, size);
                 let num_chunks = chunks.len();
+                let duration_ms = op_start.elapsed().as_millis() as u64;
 
-                Self::log_rlm_trajectory(&traj_chunk, RLMOperation::Chunk {
+                Self::log_rlm_trajectory_with_duration(&traj_chunk, RLMOperation::Chunk {
                     var_name: var_name.to_string(),
                     num_chunks,
-                });
+                }, duration_ms);
                 Self::log_event(&log_chunk, ExecutionEventType::RLMChunk,
-                    &format!("Chunked '{}' into {} chunks", var_name, num_chunks), None);
+                    &format!("Chunked '{}' into {} chunks ({}ms)", var_name, num_chunks, duration_ms), None);
 
                 chunks.into_iter().map(Dynamic::from).collect()
             } else {
+                Self::log_rlm_trajectory_error(&traj_chunk,
+                    "Failed to acquire context store lock".to_string(),
+                    format!("Attempted to chunk context '{}'", var_name));
                 rhai::Array::new()
             }
         });
@@ -318,26 +363,35 @@ impl CodeModeRuntime {
         let traj_regex = rlm_trajectory.clone();
         let log_regex = log.clone();
         engine.register_fn("regex_filter", move |var_name: &str, pattern: &str| -> rhai::Array {
+            let op_start = std::time::Instant::now();
             if let Ok(store) = store_regex.lock() {
                 match store.regex_filter(var_name, pattern) {
                     Ok(matches) => {
                         let num_matches = matches.len();
-                        Self::log_rlm_trajectory(&traj_regex, RLMOperation::RegexFilter {
+                        let duration_ms = op_start.elapsed().as_millis() as u64;
+                        Self::log_rlm_trajectory_with_duration(&traj_regex, RLMOperation::RegexFilter {
                             var_name: var_name.to_string(),
                             pattern: pattern.to_string(),
                             matches: num_matches,
-                        });
+                        }, duration_ms);
                         Self::log_event(&log_regex, ExecutionEventType::RLMRegexFilter,
-                            &format!("Regex '{}' on '{}': {} matches", pattern, var_name, num_matches), None);
+                            &format!("Regex '{}' on '{}': {} matches ({}ms)", pattern, var_name, num_matches, duration_ms), None);
                         matches.into_iter().map(Dynamic::from).collect()
                     }
                     Err(e) => {
+                        let duration_ms = op_start.elapsed().as_millis() as u64;
+                        Self::log_rlm_trajectory_error(&traj_regex,
+                            format!("Regex error: {}", e),
+                            format!("Pattern '{}' on variable '{}' after {}ms", pattern, var_name, duration_ms));
                         Self::log_event(&log_regex, ExecutionEventType::Error,
-                            &format!("Regex error: {}", e), None);
+                            &format!("Regex error on '{}': {} ({}ms)", var_name, e, duration_ms), None);
                         rhai::Array::new()
                     }
                 }
             } else {
+                Self::log_rlm_trajectory_error(&traj_regex,
+                    "Failed to acquire context store lock".to_string(),
+                    format!("Attempted regex filter on '{}'", var_name));
                 rhai::Array::new()
             }
         });
@@ -347,6 +401,7 @@ impl CodeModeRuntime {
         let traj_query = rlm_trajectory.clone();
         let log_query = log.clone();
         engine.register_fn("llm_query", move |prompt: &str| -> Dynamic {
+            let op_start = std::time::Instant::now();
             Self::log_rlm_trajectory(&traj_query, RLMOperation::SubQuery {
                 prompt_preview: prompt.chars().take(100).collect::<String>() + "...",
                 depth: 1,
@@ -363,12 +418,17 @@ impl CodeModeRuntime {
                 "",
                 &log_query,
             );
+            let duration_ms = op_start.elapsed().as_millis() as u64;
 
-            // Log the result
+            // Log the result with duration
             if let Ok(result_str) = serde_json::to_string(&result) {
-                Self::log_rlm_trajectory(&traj_query, RLMOperation::SubResult {
+                Self::log_rlm_trajectory_with_duration(&traj_query, RLMOperation::SubResult {
                     result_preview: result_str.chars().take(100).collect::<String>() + "...",
-                });
+                }, duration_ms);
+            } else {
+                Self::log_rlm_trajectory_error(&traj_query,
+                    "Failed to serialize LLM result".to_string(),
+                    format!("Query completed in {}ms but result could not be serialized", duration_ms));
             }
 
             result
@@ -380,12 +440,16 @@ impl CodeModeRuntime {
         let log_rlm = log.clone();
         let traj_rlm = rlm_trajectory.clone();
         engine.register_fn("spawn_rlm", move |atom_type: AtomType, task: &str, context_var: &str| -> Dynamic {
+            let op_start = std::time::Instant::now();
             // Get context info without including full content
             let (context_len, context_preview) = if let Ok(store) = store_rlm.lock() {
                 let len = store.length(context_var).unwrap_or(0);
                 let preview = store.peek(context_var, 0, 500).unwrap_or_default();
                 (len, preview)
             } else {
+                Self::log_rlm_trajectory_error(&traj_rlm,
+                    "Failed to acquire context store lock".to_string(),
+                    format!("Attempted spawn_rlm for context '{}'", context_var));
                 (0, String::new())
             };
 
@@ -402,14 +466,22 @@ impl CodeModeRuntime {
                 context_var, context_len, context_preview, task
             );
 
-            Self::execute_spawn_atom(
+            let result = Self::execute_spawn_atom(
                 atom_type,
                 &rlm_prompt,
                 SpawnFlags { temperature: 0.1, max_tokens: Some(4000), ..Default::default() },
                 &config_rlm,
                 "",
                 &log_rlm,
-            )
+            );
+            let duration_ms = op_start.elapsed().as_millis() as u64;
+
+            // Log final result with duration
+            Self::log_rlm_trajectory_with_memory(&traj_rlm, RLMOperation::Final {
+                answer_preview: format!("RLM spawn completed in {}ms", duration_ms),
+            }, duration_ms, context_len);
+
+            result
         });
 
         // Register has_context - check if a context variable exists
@@ -447,8 +519,8 @@ impl CodeModeRuntime {
         // Enables Rhai scripts to perform web research as part of agent workflows
         // =======================================================================
 
-        // Initialize web research worker pool
-        super::web_research_bridge::init_web_research_worker();
+        // Initialize web research worker pool (ignore errors - web research is optional)
+        let _ = super::web_research_bridge::init_web_research_worker();
 
         // Register crawl_url - crawl a single URL and return content
         let log_crawl = log.clone();
@@ -459,8 +531,8 @@ impl CodeModeRuntime {
             match super::web_research_bridge::crawl_url_sync(url.to_string(), true) {
                 Ok(result) => {
                     Self::log_event(&log_crawl, ExecutionEventType::AtomCompleted,
-                        "URL crawl completed", serde_json::to_value(&result).ok());
-                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                        "URL crawl completed", serde_json::to_value(&result).map_err(|e| eprintln!("Serialization warning: {}", e)).ok());
+                    Self::to_dynamic_or_error(&log_crawl, &result, "crawl_url")
                 }
                 Err(e) => {
                     Self::log_event(&log_crawl, ExecutionEventType::Error,
@@ -483,8 +555,8 @@ impl CodeModeRuntime {
             match super::web_research_bridge::research_docs_sync(url_strings) {
                 Ok(result) => {
                     Self::log_event(&log_research, ExecutionEventType::AtomCompleted,
-                        "Documentation research completed", serde_json::to_value(&result).ok());
-                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                        "Documentation research completed", serde_json::to_value(&result).map_err(|e| eprintln!("Serialization warning: {}", e)).ok());
+                    Self::to_dynamic_or_error(&log_research, &result, "research_docs")
                 }
                 Err(e) => {
                     Self::log_event(&log_research, ExecutionEventType::Error,
@@ -515,8 +587,8 @@ impl CodeModeRuntime {
             ) {
                 Ok(result) => {
                     Self::log_event(&log_extract, ExecutionEventType::AtomCompleted,
-                        "Content extraction completed", serde_json::to_value(&result).ok());
-                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                        "Content extraction completed", serde_json::to_value(&result).map_err(|e| eprintln!("Serialization warning: {}", e)).ok());
+                    Self::to_dynamic_or_error(&log_extract, &result, "extract_content")
                 }
                 Err(e) => {
                     Self::log_event(&log_extract, ExecutionEventType::Error,
@@ -546,6 +618,14 @@ impl CodeModeRuntime {
     /// Compile a Rhai script
     pub fn compile(&self, script: &str) -> Result<AST, Box<EvalAltResult>> {
         Ok(self.engine.compile(script)?)
+    }
+
+    /// HIGH-7: Validate a Rhai script before execution
+    /// Returns Ok(()) if script is syntactically valid, Err with parse errors otherwise
+    pub fn validate_script(&self, script: &str) -> Result<(), Box<EvalAltResult>> {
+        // Try to compile - this validates syntax without executing
+        let _ast = self.engine.compile(script)?;
+        Ok(())
     }
 
     /// P3-2: Execute a Rhai script with automatic snapshot and rollback on failure
@@ -699,16 +779,32 @@ impl CodeModeRuntime {
                 // Log completion
                 Self::log_event(log, ExecutionEventType::AtomCompleted,
                     &format!("{:?} atom completed", atom_type),
-                    serde_json::to_value(&atom_result).ok());
+                    serde_json::to_value(&atom_result).map_err(|e| eprintln!("Serialization warning: {}", e)).ok());
 
-                rhai::serde::to_dynamic(&atom_result).unwrap_or(Dynamic::UNIT)
+                // HIGH-1: Better error handling for serialization
+                match rhai::serde::to_dynamic(&atom_result) {
+                    Ok(dynamic) => dynamic,
+                    Err(e) => {
+                        Self::log_event(log, ExecutionEventType::Error,
+                            &format!("Failed to serialize atom result: {}", e), None);
+                        Dynamic::UNIT
+                    }
+                }
             }
             Err(e) => {
                 Self::log_event(log, ExecutionEventType::Error,
                     &format!("Atom failed: {}", e), None);
 
                 let error_result = AtomResult::failure(atom_type, e.clone(), vec![e]);
-                rhai::serde::to_dynamic(&error_result).unwrap_or(Dynamic::UNIT)
+                // HIGH-1: Better error handling for serialization
+                match rhai::serde::to_dynamic(&error_result) {
+                    Ok(dynamic) => dynamic,
+                    Err(ser_err) => {
+                        Self::log_event(log, ExecutionEventType::Error,
+                            &format!("Failed to serialize error result: {}", ser_err), None);
+                        Dynamic::UNIT
+                    }
+                }
             }
         }
     }
@@ -767,9 +863,9 @@ impl CodeModeRuntime {
             &format!("Consensus {} (winner: {:?})",
                 if result.reached { "reached" } else { "failed" },
                 result.winner),
-            serde_json::to_value(&result).ok());
+            serde_json::to_value(&result).map_err(|e| eprintln!("Serialization warning: {}", e)).ok());
 
-        rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+        Self::to_dynamic_or_error(log, &result, "consensus")
     }
 
     /// Helper to log execution events
@@ -792,10 +888,71 @@ impl CodeModeRuntime {
         }
     }
 
+    /// Helper to convert a serializable value to Dynamic, logging errors instead of silently discarding them
+    fn to_dynamic_or_error<T: serde::Serialize>(
+        log: &Arc<Mutex<Vec<ExecutionEvent>>>,
+        value: &T,
+        context: &str,
+    ) -> Dynamic {
+        match rhai::serde::to_dynamic(value) {
+            Ok(dynamic) => dynamic,
+            Err(e) => {
+                Self::log_event(log, ExecutionEventType::Error,
+                    &format!("Failed to serialize {} result: {}", context, e), None);
+                Dynamic::UNIT
+            }
+        }
+    }
+
     /// Helper to log RLM trajectory steps for visualization
     fn log_rlm_trajectory(
         trajectory: &Arc<Mutex<Vec<RLMTrajectoryStep>>>,
         operation: RLMOperation,
+    ) {
+        Self::log_rlm_trajectory_with_details(trajectory, operation, None, None, None);
+    }
+
+    /// Helper to log RLM trajectory steps with duration tracking
+    fn log_rlm_trajectory_with_duration(
+        trajectory: &Arc<Mutex<Vec<RLMTrajectoryStep>>>,
+        operation: RLMOperation,
+        duration_ms: u64,
+    ) {
+        Self::log_rlm_trajectory_with_details(trajectory, operation, Some(duration_ms), None, None);
+    }
+
+    /// Helper to log RLM trajectory steps with memory estimates (for context operations)
+    fn log_rlm_trajectory_with_memory(
+        trajectory: &Arc<Mutex<Vec<RLMTrajectoryStep>>>,
+        operation: RLMOperation,
+        duration_ms: u64,
+        memory_bytes: usize,
+    ) {
+        Self::log_rlm_trajectory_with_details(trajectory, operation, Some(duration_ms), Some(memory_bytes), None);
+    }
+
+    /// Helper to log RLM trajectory error steps with context
+    fn log_rlm_trajectory_error(
+        trajectory: &Arc<Mutex<Vec<RLMTrajectoryStep>>>,
+        message: String,
+        error_context: String,
+    ) {
+        Self::log_rlm_trajectory_with_details(
+            trajectory,
+            RLMOperation::Error { message },
+            None,
+            None,
+            Some(error_context),
+        );
+    }
+
+    /// Core helper to log RLM trajectory steps with all optional details
+    fn log_rlm_trajectory_with_details(
+        trajectory: &Arc<Mutex<Vec<RLMTrajectoryStep>>>,
+        operation: RLMOperation,
+        duration_ms: Option<u64>,
+        memory_estimate_bytes: Option<usize>,
+        error_context: Option<String>,
     ) {
         if let Ok(mut traj) = trajectory.lock() {
             let step = traj.len();
@@ -815,17 +972,20 @@ impl CodeModeRuntime {
                     RLMOperation::RegexFilter { var_name, pattern, matches } =>
                         format!("Regex '{}' on '{}': {} matches", pattern, var_name, matches),
                     RLMOperation::LoadContext { var_name, length } =>
-                        format!("Loaded '{}' ({} chars)", var_name, length),
+                        format!("Loaded '{}' ({} chars, ~{} bytes)", var_name, length, length),
                     RLMOperation::Final { answer_preview } =>
                         format!("Final answer: {}", answer_preview),
                     RLMOperation::Error { message } =>
                         format!("Error: {}", message),
                 },
-                data: serde_json::to_value(&operation).ok(),
+                data: serde_json::to_value(&operation).map_err(|e| eprintln!("Serialization warning: {}", e)).ok(),
                 timestamp_ms: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_millis() as u64,
+                duration_ms,
+                memory_estimate_bytes,
+                error_context,
             });
         }
     }

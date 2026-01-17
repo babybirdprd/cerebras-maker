@@ -224,7 +224,10 @@ impl WorkspaceDetector {
         for line in content.lines() {
             let trimmed = line.trim();
             if trimmed.starts_with("use") && !trimmed.starts_with("use (") {
-                let path = trimmed.strip_prefix("use").unwrap().trim();
+                // Use if-let for safe prefix stripping instead of unwrap
+                let Some(path) = trimmed.strip_prefix("use").map(|s| s.trim()) else {
+                    continue;
+                };
                 if !path.is_empty() {
                     let pkg_path = dir.join(path);
                     if pkg_path.exists() {

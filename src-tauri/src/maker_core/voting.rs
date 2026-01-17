@@ -193,7 +193,8 @@ pub async fn run_consensus(
 
                 // Check if consensus reached
                 if let Some(winner) = check_consensus(&candidates, config.k_threshold, config.min_votes) {
-                    let winning_votes = *candidates.get(&winner).unwrap_or(&0);
+                    // HIGH-5: Cleaner pattern - get vote count directly since we just found the winner
+                    let winning_votes = candidates.get(&winner).copied().unwrap_or(0);
                     return ConsensusResult::success(
                         winner,
                         winning_votes,

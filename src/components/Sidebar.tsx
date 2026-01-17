@@ -1,5 +1,5 @@
 import React from 'react';
-import { LayoutDashboard, Network, History, Settings, Terminal, ShieldCheck, Home, MessageSquare, Shield, FileCheck, FolderOpen, Loader2, CheckCircle, AlertCircle, Zap } from 'lucide-react';
+import { LayoutDashboard, Network, History, Settings, Terminal, ShieldCheck, Home, MessageSquare, Shield, FileCheck, FolderOpen, Loader2, CheckCircle, AlertCircle, Zap, MessagesSquare } from 'lucide-react';
 
 interface SidebarProps {
   currentView: string;
@@ -14,6 +14,7 @@ const navItems = [
   { id: 'upload', label: 'New Project', icon: Home },
   { id: 'sessions', label: 'Sessions', icon: FolderOpen },
   { id: 'interrogation', label: 'Chat', icon: MessageSquare },
+  { id: 'threads', label: 'Threads', icon: MessagesSquare },
   { id: 'dashboard', label: 'Blueprint', icon: LayoutDashboard },
   { id: 'topology', label: 'Topology', icon: Network },
   { id: 'execution', label: 'Swarm', icon: Terminal },

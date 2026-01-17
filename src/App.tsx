@@ -20,11 +20,12 @@ import KnowledgePanel from './components/KnowledgePanel';
 import { TestPanel } from './components/TestPanel';
 import { ValidationPanel } from './components/ValidationPanel';
 import SessionPanel from './components/SessionPanel';
+import ThreadPanel from './components/ThreadPanel';
 
 // Tauri hooks
 import { openProjectDialog, loadSymbolGraph, initRuntime, analyzePrd, sendInterrogationMessage, completeInterrogation, transformGraphForD3, ProjectTemplate, createFromTemplate, kbCompileForInterrogator, SessionData, updateSession } from './hooks/useTauri';
 
-type ViewType = 'dashboard' | 'topology' | 'execution' | 'history' | 'upload' | 'interrogation' | 'validation' | 'tests' | 'sessions';
+type ViewType = 'dashboard' | 'topology' | 'execution' | 'history' | 'upload' | 'interrogation' | 'validation' | 'tests' | 'sessions' | 'threads';
 
 function App() {
   const [currentView, setCurrentView] = useState<ViewType>('upload');
@@ -453,6 +454,9 @@ function App() {
             </div>
           </div>
         );
+
+      case 'threads':
+        return <ThreadPanel className="h-full" />;
 
       default:
         return null;

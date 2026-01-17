@@ -214,3 +214,48 @@ impl Default for SpawnFlags {
     }
 }
 
+impl SpawnFlags {
+    /// HIGH-11: Validate spawn flags before execution
+    pub fn validate(&self) -> Result<(), String> {
+        // Temperature must be between 0.0 and 2.0
+        if self.temperature < 0.0 || self.temperature > 2.0 {
+            return Err(format!(
+                "Temperature must be between 0.0 and 2.0, got {}",
+                self.temperature
+            ));
+        }
+
+        // Max tokens must be reasonable if specified
+        if let Some(max_tokens) = self.max_tokens {
+            if max_tokens == 0 {
+                return Err("max_tokens cannot be 0".to_string());
+            }
+            if max_tokens > 100_000 {
+                return Err(format!(
+                    "max_tokens {} exceeds maximum allowed (100,000)",
+                    max_tokens
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Create validated spawn flags, returning error if invalid
+    pub fn new_validated(
+        require_json: bool,
+        max_tokens: Option<usize>,
+        temperature: f32,
+        red_flag_check: bool,
+    ) -> Result<Self, String> {
+        let flags = Self {
+            require_json,
+            max_tokens,
+            temperature,
+            red_flag_check,
+        };
+        flags.validate()?;
+        Ok(flags)
+    }
+}
+

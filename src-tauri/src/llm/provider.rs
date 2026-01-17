@@ -29,7 +29,12 @@ pub struct LlmConfig {
     pub base_url: Option<String>,
     pub temperature: f32,
     pub max_tokens: u32,
+    /// HIGH-4: Timeout in seconds for LLM calls (default: 120)
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
 }
+
+fn default_timeout() -> u64 { 120 }
 
 impl Default for LlmConfig {
     fn default() -> Self {
@@ -40,6 +45,7 @@ impl Default for LlmConfig {
             base_url: None,
             temperature: 0.7,
             max_tokens: 4096,
+            timeout_secs: 120,
         }
     }
 }
@@ -54,6 +60,7 @@ impl LlmConfig {
             base_url: None, // cerebras-rs handles the endpoint internally
             temperature: 0.7,
             max_tokens: 8192,
+            timeout_secs: 120,
         }
     }
 
@@ -66,6 +73,7 @@ impl LlmConfig {
             base_url: None,
             temperature: 0.7,
             max_tokens: 4096,
+            timeout_secs: 120,
         }
     }
 
@@ -78,6 +86,7 @@ impl LlmConfig {
             base_url: Some("https://openrouter.ai/api/v1".to_string()),
             temperature: 0.7,
             max_tokens: 4096,
+            timeout_secs: 120,
         }
     }
 
@@ -90,7 +99,14 @@ impl LlmConfig {
             base_url: Some(base_url.to_string()),
             temperature: 0.7,
             max_tokens: 4096,
+            timeout_secs: 120,
         }
+    }
+
+    /// Set timeout for LLM calls
+    pub fn with_timeout(mut self, secs: u64) -> Self {
+        self.timeout_secs = secs;
+        self
     }
 }
 
@@ -147,6 +163,7 @@ impl LlmProvider {
     }
 
     /// Complete a chat conversation
+    /// HIGH-4: Now includes configurable timeout
     pub async fn complete(&self, messages: Vec<Message>) -> Result<LlmResponse, anyhow::Error> {
         // Build the prompt from messages
         let system_prompt = messages.iter()
@@ -161,8 +178,16 @@ impl LlmProvider {
 
         let user_prompt = user_messages.join("\n\n");
 
-        // Use rig-core for the actual completion
-        let content = self.call_llm(system_prompt, &user_prompt).await?;
+        // HIGH-4: Wrap LLM call with timeout to prevent indefinite hanging
+        let timeout_duration = std::time::Duration::from_secs(self.config.timeout_secs);
+        let llm_future = self.call_llm(system_prompt, &user_prompt);
+
+        let content = tokio::time::timeout(timeout_duration, llm_future)
+            .await
+            .map_err(|_| anyhow::anyhow!(
+                "LLM call timed out after {} seconds",
+                self.config.timeout_secs
+            ))??;
 
         Ok(LlmResponse {
             content,

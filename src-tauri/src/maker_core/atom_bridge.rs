@@ -35,7 +35,8 @@ pub struct AtomWorkerPool {
 
 impl AtomWorkerPool {
     /// Create a new worker pool with dedicated runtime thread
-    pub fn new(llm_config: Arc<LlmConfig>) -> Self {
+    /// Returns Result to handle initialization failures gracefully
+    pub fn new(llm_config: Arc<LlmConfig>) -> Result<Self, String> {
         let (atom_tx, mut atom_rx) = mpsc::channel::<AtomRequest>(64);
 
         let executor = Arc::new(AtomExecutor::new((*llm_config).clone()));
@@ -45,12 +46,18 @@ impl AtomWorkerPool {
         std::thread::Builder::new()
             .name("atom-worker-pool".to_string())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
+                let rt = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(4)
                     .thread_name("atom-worker")
                     .enable_all()
                     .build()
-                    .expect("Failed to create atom worker runtime");
+                {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("CRIT-5: Failed to create atom worker runtime: {}", e);
+                        return;
+                    }
+                };
 
                 rt.block_on(async move {
                     while let Some(request) = atom_rx.recv().await {
@@ -62,12 +69,12 @@ impl AtomWorkerPool {
                     }
                 });
             })
-            .expect("Failed to spawn atom worker thread");
+            .map_err(|e| format!("Failed to spawn atom worker thread: {}", e))?;
 
-        Self {
+        Ok(Self {
             atom_tx,
             executor,
-        }
+        })
     }
     
     /// Execute an atom synchronously (safe to call from Rhai)
@@ -93,11 +100,14 @@ impl AtomWorkerPool {
 static ATOM_POOL: Lazy<Mutex<Option<AtomWorkerPool>>> = Lazy::new(|| Mutex::new(None));
 
 /// Initialize the global atom worker pool
-pub fn init_atom_pool(llm_config: Arc<LlmConfig>) {
-    let mut pool = ATOM_POOL.lock().unwrap();
+/// Returns Result to propagate initialization errors
+pub fn init_atom_pool(llm_config: Arc<LlmConfig>) -> Result<(), String> {
+    let mut pool = ATOM_POOL.lock()
+        .map_err(|e| format!("Failed to acquire atom pool lock: {}", e))?;
     if pool.is_none() {
-        *pool = Some(AtomWorkerPool::new(llm_config));
+        *pool = Some(AtomWorkerPool::new(llm_config)?);
     }
+    Ok(())
 }
 
 /// Check if the pool is initialized

@@ -1,7 +1,7 @@
 ---
 name: researcher
 description: Researches documentation, implementation details, and code examples from online sources
-model: claude-haiku-4.5
+model: claude-sonnet-4.5
 color: cyan
 ---
 

@@ -42,19 +42,25 @@ pub struct WebResearchWorker {
 
 impl WebResearchWorker {
     /// Create a new web research worker with dedicated runtime thread
-    pub fn new() -> Self {
+    /// HIGH-8: Now returns Result instead of panicking
+    pub fn new() -> Result<Self, String> {
         let (request_tx, mut request_rx) = mpsc::channel::<WebResearchRequest>(64);
 
         // Spawn dedicated runtime thread for web research operations
         std::thread::Builder::new()
             .name("web-research-worker".to_string())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_multi_thread()
+                let rt = match tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .thread_name("web-research")
                     .enable_all()
-                    .build()
-                    .expect("Failed to create web research runtime");
+                    .build() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        eprintln!("Failed to create web research runtime: {}", e);
+                        return;
+                    }
+                };
 
                 rt.block_on(async move {
                     while let Some(request) = request_rx.recv().await {
@@ -75,9 +81,9 @@ impl WebResearchWorker {
                     }
                 });
             })
-            .expect("Failed to spawn web research worker thread");
+            .map_err(|e| format!("Failed to spawn web research worker thread: {}", e))?;
 
-        Self { request_tx }
+        Ok(Self { request_tx })
     }
 
     /// Crawl a single URL (async implementation)
@@ -233,21 +239,21 @@ impl WebResearchWorker {
     }
 }
 
-impl Default for WebResearchWorker {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Note: Default is not implemented because WebResearchWorker::new() returns Result
+// Use WebResearchWorker::new() directly and handle the Result
 
 /// Global web research worker instance
 static WEB_RESEARCH_WORKER: Lazy<Mutex<Option<WebResearchWorker>>> = Lazy::new(|| Mutex::new(None));
 
 /// Initialize the global web research worker
-pub fn init_web_research_worker() {
-    let mut worker = WEB_RESEARCH_WORKER.lock().unwrap();
+/// HIGH-8: Now returns Result instead of panicking
+pub fn init_web_research_worker() -> Result<(), String> {
+    let mut worker = WEB_RESEARCH_WORKER.lock()
+        .map_err(|_| "Failed to acquire web research worker lock")?;
     if worker.is_none() {
-        *worker = Some(WebResearchWorker::new());
+        *worker = Some(WebResearchWorker::new()?);
     }
+    Ok(())
 }
 
 /// Check if the worker is initialized
