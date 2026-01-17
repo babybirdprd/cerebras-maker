@@ -6,7 +6,7 @@ use super::atom::{AtomResult, AtomType, SpawnFlags};
 use super::rlm::{RLMConfig, RLMOperation, RLMTrajectoryStep, ContextType, SharedRLMContextStore};
 use super::shadow_git::ShadowGit;
 use super::voting::{ConsensusConfig, ConsensusResult, run_consensus as voting_run_consensus};
-use crate::agents::{AtomExecutor, AtomInput};
+use crate::agents::AtomInput;
 use crate::grits;
 use crate::llm::LlmConfig;
 use rhai::{Dynamic, Engine, EvalAltResult, Scope, AST};
@@ -84,6 +84,10 @@ impl CodeModeRuntime {
         let llm_config = Arc::new(llm_config);
         let rlm_context_store = super::rlm::create_shared_store();
         let rlm_trajectory = Arc::new(Mutex::new(Vec::new()));
+
+        // Initialize the atom worker pool for safe async-to-sync bridging
+        // This creates a dedicated runtime thread that handles all atom executions
+        super::atom_bridge::init_atom_pool(llm_config.clone());
 
         // Register MAKER API functions (including RLM functions)
         Self::register_api(
@@ -437,6 +441,90 @@ impl CodeModeRuntime {
                 rhai::Array::new()
             }
         });
+
+        // =======================================================================
+        // Web Research API Functions (crawl4ai integration)
+        // Enables Rhai scripts to perform web research as part of agent workflows
+        // =======================================================================
+
+        // Initialize web research worker pool
+        super::web_research_bridge::init_web_research_worker();
+
+        // Register crawl_url - crawl a single URL and return content
+        let log_crawl = log.clone();
+        engine.register_fn("crawl_url", move |url: &str| -> Dynamic {
+            Self::log_event(&log_crawl, ExecutionEventType::AtomSpawned,
+                &format!("Crawling URL: {}", url), None);
+
+            match super::web_research_bridge::crawl_url_sync(url.to_string(), true) {
+                Ok(result) => {
+                    Self::log_event(&log_crawl, ExecutionEventType::AtomCompleted,
+                        "URL crawl completed", serde_json::to_value(&result).ok());
+                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                }
+                Err(e) => {
+                    Self::log_event(&log_crawl, ExecutionEventType::Error,
+                        &format!("Crawl failed: {}", e), None);
+                    Dynamic::UNIT
+                }
+            }
+        });
+
+        // Register research_docs - research multiple documentation URLs
+        let log_research = log.clone();
+        engine.register_fn("research_docs", move |urls: rhai::Array| -> Dynamic {
+            let url_strings: Vec<String> = urls.into_iter()
+                .filter_map(|v| v.into_string().ok())
+                .collect();
+
+            Self::log_event(&log_research, ExecutionEventType::AtomSpawned,
+                &format!("Researching {} documentation URLs", url_strings.len()), None);
+
+            match super::web_research_bridge::research_docs_sync(url_strings) {
+                Ok(result) => {
+                    Self::log_event(&log_research, ExecutionEventType::AtomCompleted,
+                        "Documentation research completed", serde_json::to_value(&result).ok());
+                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                }
+                Err(e) => {
+                    Self::log_event(&log_research, ExecutionEventType::Error,
+                        &format!("Research failed: {}", e), None);
+                    Dynamic::UNIT
+                }
+            }
+        });
+
+        // Register extract_content - extract structured content using CSS selectors
+        let log_extract = log.clone();
+        engine.register_fn("extract_content", move |url: &str, selector: &str| -> Dynamic {
+            Self::log_event(&log_extract, ExecutionEventType::AtomSpawned,
+                &format!("Extracting content from {} with selector: {}", url, selector), None);
+
+            // Build a simple CSS extraction schema
+            let schema = serde_json::json!({
+                "baseSelector": "body",
+                "fields": [
+                    {"name": "content", "selector": selector, "type": "text"}
+                ]
+            });
+
+            match super::web_research_bridge::extract_content_sync(
+                url.to_string(),
+                "css".to_string(),
+                schema,
+            ) {
+                Ok(result) => {
+                    Self::log_event(&log_extract, ExecutionEventType::AtomCompleted,
+                        "Content extraction completed", serde_json::to_value(&result).ok());
+                    rhai::serde::to_dynamic(&result).unwrap_or(Dynamic::UNIT)
+                }
+                Err(e) => {
+                    Self::log_event(&log_extract, ExecutionEventType::Error,
+                        &format!("Extraction failed: {}", e), None);
+                    Dynamic::UNIT
+                }
+            }
+        });
     }
 
     /// Create the AtomType module for Rhai
@@ -451,6 +539,7 @@ impl CodeModeRuntime {
         module.set_var("Architect", AtomType::Architect);
         module.set_var("GritsAnalyzer", AtomType::GritsAnalyzer);
         module.set_var("RLMProcessor", AtomType::RLMProcessor);
+        module.set_var("WebResearcher", AtomType::WebResearcher);
         module
     }
 
@@ -584,11 +673,12 @@ impl CodeModeRuntime {
     }
 
     /// Execute spawn_atom by bridging to async AtomExecutor
+    /// Uses the dedicated AtomWorkerPool for safe async-to-sync bridging
     fn execute_spawn_atom(
         atom_type: AtomType,
         prompt: &str,
         flags: SpawnFlags,
-        llm_config: &LlmConfig,
+        _llm_config: &LlmConfig,
         _workspace_path: &str,
         log: &Arc<Mutex<Vec<ExecutionEvent>>>,
     ) -> Dynamic {
@@ -600,27 +690,9 @@ impl CodeModeRuntime {
         let input = AtomInput::new(atom_type.clone(), prompt)
             .with_flags(flags);
 
-        // Create executor
-        let executor = AtomExecutor::new(llm_config.clone());
-
-        // Bridge async to sync using tokio runtime handle
-        let result = match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // We're in an async context, block on the future
-                std::thread::scope(|s| {
-                    s.spawn(|| {
-                        handle.block_on(executor.execute(input))
-                    }).join().unwrap_or_else(|_| Err("Thread panicked".to_string()))
-                })
-            }
-            Err(_) => {
-                // Not in async context, create a new runtime
-                match tokio::runtime::Runtime::new() {
-                    Ok(rt) => rt.block_on(executor.execute(input)),
-                    Err(e) => Err(format!("Failed to create runtime: {}", e)),
-                }
-            }
-        };
+        // Use the worker pool bridge for safe async-to-sync execution
+        // This avoids creating a new runtime per call and handles async context properly
+        let result = super::atom_bridge::execute_atom_sync(input);
 
         match result {
             Ok(atom_result) => {

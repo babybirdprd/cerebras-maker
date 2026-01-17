@@ -16,6 +16,14 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use thiserror::Error;
 
+// Network idle detection constants for adaptive polling
+/// Minimum polling interval when network is active (fast response)
+const NETWORK_IDLE_POLL_MIN_MS: u64 = 10;
+/// Maximum polling interval when network is idle (save CPU)
+const NETWORK_IDLE_POLL_MAX_MS: u64 = 500;
+/// Default idle threshold in milliseconds
+const NETWORK_IDLE_THRESHOLD_MS: u64 = 500;
+
 /// Errors that can occur during the crawling process.
 #[derive(Error, Debug)]
 pub enum CrawlerError {
@@ -389,10 +397,14 @@ impl AsyncWebCrawler {
                             if let (Ok(mut request_sent), Ok(mut request_finished), Ok(mut request_failed)) =
                                 (request_sent, request_finished, request_failed)
                             {
-                                let mut active_requests = 0;
+                                let mut active_requests: i32 = 0;
                                 let mut last_activity = Instant::now();
-                                let required_idle_time = Duration::from_millis(idle_time.unwrap_or(500));
+                                let required_idle_time = Duration::from_millis(idle_time.unwrap_or(NETWORK_IDLE_THRESHOLD_MS));
                                 let start_wait = Instant::now();
+
+                                // Adaptive polling: track activity to adjust poll interval
+                                let mut requests_since_last_check: u32 = 0;
+                                let mut current_poll_ms = NETWORK_IDLE_POLL_MIN_MS;
 
                                 loop {
                                     if start_wait.elapsed() > timeout {
@@ -404,21 +416,37 @@ impl AsyncWebCrawler {
                                         break;
                                     }
 
+                                    // Use biased select for deterministic priority:
+                                    // 1. Process network events first (highest priority)
+                                    // 2. Sleep/poll check last (lowest priority)
                                     tokio::select! {
-                                        _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                                            // Periodic check
-                                        }
+                                        biased;
+
                                         Some(_) = request_sent.next() => {
                                             active_requests += 1;
                                             last_activity = Instant::now();
+                                            requests_since_last_check += 1;
                                         }
                                         Some(_) = request_finished.next() => {
                                             if active_requests > 0 { active_requests -= 1; }
                                             last_activity = Instant::now();
+                                            requests_since_last_check += 1;
                                         }
                                         Some(_) = request_failed.next() => {
                                             if active_requests > 0 { active_requests -= 1; }
                                             last_activity = Instant::now();
+                                            requests_since_last_check += 1;
+                                        }
+                                        _ = tokio::time::sleep(Duration::from_millis(current_poll_ms)) => {
+                                            // Adaptive polling: adjust interval based on activity
+                                            if requests_since_last_check > 0 || active_requests > 0 {
+                                                // Active: use fast polling
+                                                current_poll_ms = NETWORK_IDLE_POLL_MIN_MS;
+                                            } else {
+                                                // Idle: gradually increase poll interval to save CPU
+                                                current_poll_ms = (current_poll_ms * 2).min(NETWORK_IDLE_POLL_MAX_MS);
+                                            }
+                                            requests_since_last_check = 0;
                                         }
                                     }
                                 }

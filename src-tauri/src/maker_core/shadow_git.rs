@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+
+
 /// Snapshot metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Snapshot {
@@ -92,6 +94,7 @@ impl ShadowGit {
 
     /// Stage all changes in the workspace
     /// Uses git command for reliable cross-platform staging
+    #[cfg(not(feature = "native-git"))]
     fn stage_all(&self) -> Result<()> {
         let output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
@@ -104,7 +107,15 @@ impl ShadowGit {
         Ok(())
     }
 
+    /// Stage all changes using native gix
+    #[cfg(feature = "native-git")]
+    fn stage_all(&self) -> Result<()> {
+        self.stage_all_native()
+            .map_err(|e| anyhow!("{}", e))
+    }
+
     /// Create a commit with the given message
+    #[cfg(not(feature = "native-git"))]
     fn create_commit(&self, message: &str) -> Result<String> {
         let output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
@@ -130,6 +141,13 @@ impl ShadowGit {
             .output()?;
 
         Ok(String::from_utf8_lossy(&hash_output.stdout).trim().to_string())
+    }
+
+    /// Create a commit using native gix
+    #[cfg(feature = "native-git")]
+    fn create_commit(&self, message: &str) -> Result<String> {
+        self.create_commit_native(message)
+            .map_err(|e| anyhow!("{}", e))
     }
 
     /// Rollback to the previous snapshot
@@ -174,6 +192,7 @@ impl ShadowGit {
 
     /// Perform a hard reset to a specific commit
     /// Uses git command for reliable reset with working directory update
+    #[cfg(not(feature = "native-git"))]
     fn reset_hard(&self, commit_hash: &str) -> Result<()> {
         let output = std::process::Command::new("git")
             .current_dir(&self.workspace_path)
@@ -182,6 +201,240 @@ impl ShadowGit {
 
         if !output.status.success() {
             return Err(anyhow!("Failed to reset to {}", commit_hash));
+        }
+        Ok(())
+    }
+
+    /// Perform a hard reset to a specific commit using native gix
+    #[cfg(feature = "native-git")]
+    fn reset_hard(&self, commit_hash: &str) -> Result<()> {
+        self.reset_hard_native(commit_hash)
+            .map_err(|e| anyhow!("{}", e))
+    }
+
+    /// Stage all changes using native gix index API
+    /// Walks the worktree and adds all files to the index
+    #[cfg(feature = "native-git")]
+    pub fn stage_all_native(&self) -> Result<(), String> {
+        let repo = self.repo.as_ref().ok_or("Repository not initialized")?;
+
+        // Get the worktree path
+        let workdir = repo.workdir().ok_or("No worktree available")?;
+
+        // Create a new empty index state
+        let mut index_state = gix::index::State::new(repo.object_hash());
+
+        // Walk the worktree and add all files
+        let walker = walkdir::WalkDir::new(workdir)
+            .into_iter()
+            .filter_entry(|e| {
+                // Skip .git directory
+                !e.path().components().any(|c| c.as_os_str() == ".git")
+            });
+
+        for entry in walker.filter_map(|e| e.ok()) {
+            if entry.file_type().is_file() {
+                let path = entry.path();
+                let rel_path = path.strip_prefix(workdir)
+                    .map_err(|e| e.to_string())?;
+
+                // Read file content and compute hash
+                let content = std::fs::read(path).map_err(|e| e.to_string())?;
+                let blob_id = repo.write_blob(&content)
+                    .map_err(|e| e.to_string())?
+                    .detach();
+
+                // Create a default stat (we don't need precise stat for staging)
+                let stat = gix::index::entry::Stat::default();
+
+                // Determine file mode - default to regular file
+                #[cfg(unix)]
+                let mode = {
+                    use std::os::unix::fs::PermissionsExt;
+                    let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+                    if metadata.permissions().mode() & 0o111 != 0 {
+                        gix::index::entry::Mode::FILE_EXECUTABLE
+                    } else {
+                        gix::index::entry::Mode::FILE
+                    }
+                };
+                #[cfg(not(unix))]
+                let mode = gix::index::entry::Mode::FILE;
+
+                // Convert path to BStr - use forward slashes for git compatibility
+                let rel_path_str = rel_path.to_string_lossy().replace('\\', "/");
+                let path_bstr = gix::bstr::BStr::new(rel_path_str.as_bytes());
+
+                // Add entry to index
+                index_state.dangerously_push_entry(
+                    stat,
+                    blob_id,
+                    gix::index::entry::Flags::empty(),
+                    mode,
+                    path_bstr,
+                );
+            }
+        }
+
+        // Sort entries to maintain index invariants
+        index_state.sort_entries();
+
+        // Write the index back to disk
+        let index_path = repo.index_path();
+        let mut index_file = gix::index::File::from_state(index_state, index_path);
+        index_file.write(gix::index::write::Options::default())
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    /// Create a commit using native gix API
+    /// Returns the commit hash as a string
+    #[cfg(feature = "native-git")]
+    pub fn create_commit_native(&self, message: &str) -> Result<String, String> {
+        let repo = self.repo.as_ref().ok_or("Repository not initialized")?;
+
+        // Get the current index
+        let index = repo.index().map_err(|e| e.to_string())?;
+
+        // Build a tree from the index entries using the tree editor
+        // Start with an empty tree and add all entries from the index
+        let empty_tree_id = repo.empty_tree().id().detach();
+        let mut tree_editor = repo.edit_tree(empty_tree_id)
+            .map_err(|e| format!("Failed to create tree editor: {}", e))?;
+
+        // Add each entry from the index to the tree
+        for entry in index.entries() {
+            let path = entry.path(&index);
+            // Convert index entry mode to tree entry mode
+            let tree_mode = entry.mode.to_tree_entry_mode()
+                .ok_or_else(|| format!("Invalid mode for entry: {:?}", entry.mode))?;
+            tree_editor.upsert(path, tree_mode.kind(), entry.id)
+                .map_err(|e| format!("Failed to add entry to tree: {}", e))?;
+        }
+
+        // Write the tree and get its ID
+        let tree_id = tree_editor.write()
+            .map_err(|e| format!("Failed to write tree: {}", e))?
+            .detach();
+
+        // Get parent commit (HEAD), if any
+        let parents: Vec<gix::ObjectId> = match repo.head_commit() {
+            Ok(commit) => vec![commit.id().detach()],
+            Err(_) => vec![], // Initial commit, no parents
+        };
+
+        // Create the commit
+        let commit_id = repo.commit(
+            "HEAD",
+            message,
+            tree_id,
+            parents.iter().map(|id| id.as_ref()),
+        ).map_err(|e| format!("Failed to create commit: {}", e))?;
+
+        Ok(commit_id.to_string())
+    }
+
+    /// Reset HEAD to a specific commit and checkout the tree using native gix
+    #[cfg(feature = "native-git")]
+    pub fn reset_hard_native(&self, commit: &str) -> Result<(), String> {
+        let repo = self.repo.as_ref().ok_or("Repository not initialized")?;
+
+        // Parse the commit reference
+        let commit_id = repo.rev_parse_single(commit)
+            .map_err(|e| format!("Failed to parse commit '{}': {}", commit, e))?
+            .detach();
+
+        // Get the commit object
+        let commit_obj = repo.find_commit(commit_id)
+            .map_err(|e| format!("Failed to find commit: {}", e))?;
+
+        // Get the tree from the commit
+        let tree_id = commit_obj.tree_id()
+            .map_err(|e| format!("Failed to get tree: {}", e))?;
+
+        // Get worktree path
+        let workdir = repo.workdir()
+            .ok_or("No worktree available")?
+            .to_path_buf();
+
+        // Create index from the tree and write it to disk
+        let index = repo.index_from_tree(&tree_id)
+            .map_err(|e| format!("Failed to create index from tree: {}", e))?;
+
+        // Write the index to disk
+        let index_path = repo.index_path();
+        let mut index_file = gix::index::File::from_state(gix::index::State::from(index), index_path);
+        index_file.write(gix::index::write::Options::default())
+            .map_err(|e| format!("Failed to write index: {}", e))?;
+
+        // Checkout files from the tree to the worktree
+        // We iterate through the tree and write each blob to the worktree
+        let tree = repo.find_tree(tree_id.detach())
+            .map_err(|e| format!("Failed to find tree: {}", e))?;
+
+        Self::checkout_tree_to_worktree(repo, &tree, &workdir, &workdir)?;
+
+        // Update HEAD to point to the commit
+        repo.reference(
+            "HEAD",
+            commit_id,
+            gix::refs::transaction::PreviousValue::Any,
+            format!("reset: moving to {}", commit),
+        ).map_err(|e| format!("Failed to update HEAD: {}", e))?;
+
+        Ok(())
+    }
+
+    /// Helper function to recursively checkout a tree to the worktree
+    #[cfg(feature = "native-git")]
+    fn checkout_tree_to_worktree(
+        repo: &gix::Repository,
+        tree: &gix::Tree<'_>,
+        workdir: &std::path::Path,
+        current_path: &std::path::Path,
+    ) -> Result<(), String> {
+        for entry in tree.iter() {
+            let entry = entry.map_err(|e| format!("Failed to iterate tree: {}", e))?;
+            let entry_path = current_path.join(entry.filename().to_string());
+
+            match entry.mode().kind() {
+                gix::object::tree::EntryKind::Blob | gix::object::tree::EntryKind::BlobExecutable => {
+                    // Read the blob and write to file
+                    let blob = repo.find_blob(entry.object_id())
+                        .map_err(|e| format!("Failed to find blob: {}", e))?;
+
+                    // Ensure parent directory exists
+                    if let Some(parent) = entry_path.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("Failed to create directory: {}", e))?;
+                    }
+
+                    std::fs::write(&entry_path, &*blob.data)
+                        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+                    // Set executable permission on Unix
+                    #[cfg(unix)]
+                    if entry.mode().kind() == gix::object::tree::EntryKind::BlobExecutable {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = std::fs::metadata(&entry_path)
+                            .map_err(|e| e.to_string())?
+                            .permissions();
+                        perms.set_mode(perms.mode() | 0o111);
+                        std::fs::set_permissions(&entry_path, perms)
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                gix::object::tree::EntryKind::Tree => {
+                    // Recursively checkout subtree
+                    let subtree = repo.find_tree(entry.object_id())
+                        .map_err(|e| format!("Failed to find subtree: {}", e))?;
+                    Self::checkout_tree_to_worktree(repo, &subtree, workdir, &entry_path)?;
+                }
+                _ => {
+                    // Skip symlinks and other entry types for now
+                }
+            }
         }
         Ok(())
     }

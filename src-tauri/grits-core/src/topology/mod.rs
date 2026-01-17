@@ -57,6 +57,7 @@ impl SymbolGraph {
 }
 
 pub mod analysis;
+pub mod builtins;
 pub mod layers;
 pub mod virtual_apply;
 

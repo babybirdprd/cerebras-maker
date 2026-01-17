@@ -1,4 +1,6 @@
 #[cfg(not(target_arch = "wasm32"))]
+use super::builtins::BuiltinDetector;
+#[cfg(not(target_arch = "wasm32"))]
 use super::{Symbol, SymbolGraph};
 #[cfg(not(target_arch = "wasm32"))]
 use anyhow::Result;
@@ -9,347 +11,22 @@ use streaming_iterator::StreamingIterator;
 #[cfg(not(target_arch = "wasm32"))]
 use tree_sitter::{Parser, Query, QueryCursor};
 
-/// Language built-ins that should be excluded from topology analysis.
-/// These create "noise" in cycle detection as they're used everywhere.
-#[cfg(not(target_arch = "wasm32"))]
-fn is_builtin_symbol(name: &str, language: &str) -> bool {
-    // Quick pattern-based checks (before expensive array lookups)
-    // Filter single-letter identifiers (generic type params like T, E, F)
-    if name.len() == 1
-        && name
-            .chars()
-            .next()
-            .map_or(false, |c| c.is_ascii_uppercase())
-    {
-        return true;
-    }
-
-    // Filter compound expressions that got captured (e.g., "Ok(())")
-    if name.contains("()") || name.contains("::") {
-        return true;
-    }
-
-    // Filter numeric literals and simple strings
-    if name.parse::<f64>().is_ok() || name.starts_with('"') || name.starts_with('\'') {
-        return true;
-    }
-
-    // Rust built-ins
-    static RUST_BUILTINS: &[&str] = &[
-        // Result/Option variants
-        "Ok",
-        "Err",
-        "Some",
-        "None",
-        "Result",
-        "Option",
-        // Collections
-        "String",
-        "Vec",
-        "Box",
-        "Rc",
-        "Arc",
-        "RefCell",
-        "Cell",
-        "Mutex",
-        "RwLock",
-        "HashMap",
-        "HashSet",
-        "BTreeMap",
-        "BTreeSet",
-        "VecDeque",
-        "LinkedList",
-        "BinaryHeap",
-        // Printing/debugging macros
-        "println",
-        "print",
-        "eprintln",
-        "eprint",
-        "format",
-        "panic",
-        "assert",
-        "assert_eq",
-        "assert_ne",
-        "debug_assert",
-        "debug_assert_eq",
-        "unreachable",
-        "todo",
-        "unimplemented",
-        "dbg",
-        "vec",
-        "write",
-        "writeln",
-        "include_str",
-        "include_bytes",
-        "env",
-        "concat",
-        "stringify",
-        "cfg",
-        "matches",
-        "log",
-        "trace",
-        "info",
-        "warn",
-        "error",
-        // Common traits
-        "Clone",
-        "Copy",
-        "Default",
-        "Debug",
-        "Display",
-        "PartialEq",
-        "Eq",
-        "PartialOrd",
-        "Ord",
-        "Hash",
-        "Send",
-        "Sync",
-        "Sized",
-        "Drop",
-        "From",
-        "Into",
-        "TryFrom",
-        "TryInto",
-        "AsRef",
-        "AsMut",
-        "Deref",
-        "DerefMut",
-        "Iterator",
-        "IntoIterator",
-        "Extend",
-        "FromIterator",
-        "Read",
-        "Write",
-        "Seek",
-        "BufRead",
-        "Error",
-        "Serialize",
-        "Deserialize",
-        "Fn",
-        "FnMut",
-        "FnOnce",
-        // Primitive types
-        "()",
-        "unit",
-        "bool",
-        "true",
-        "false",
-        "i8",
-        "i16",
-        "i32",
-        "i64",
-        "i128",
-        "isize",
-        "u8",
-        "u16",
-        "u32",
-        "u64",
-        "u128",
-        "usize",
-        "f32",
-        "f64",
-        "str",
-        "char",
-        // Keywords and common identifiers
-        "Self",
-        "self",
-        "static",
-        "mut",
-        "ref",
-        "pub",
-        "move",
-        "drop",
-        "forget",
-        "new",
-        "default",
-        // Error handling (anyhow, thiserror, etc.)
-        "anyhow",
-        "bail",
-        "ensure",
-        "context",
-        "Context",
-        "with_context",
-        // Path and filesystem (commonly imported everywhere)
-        "Path",
-        "PathBuf",
-        "File",
-        "fs",
-        "io",
-        "std",
-        // Common method names that get captured as calls
-        "clone",
-        "into",
-        "from",
-        "as_ref",
-        "as_mut",
-        "unwrap",
-        "unwrap_or",
-        "unwrap_or_else",
-        "unwrap_or_default",
-        "expect",
-        "ok",
-        "err",
-        "is_ok",
-        "is_err",
-        "is_some",
-        "is_none",
-        "map",
-        "map_err",
-        "and_then",
-        "or_else",
-        "take",
-        "replace",
-        "get",
-        "get_mut",
-        "insert",
-        "remove",
-        "contains",
-        "push",
-        "pop",
-        "len",
-        "is_empty",
-        "iter",
-        "iter_mut",
-        "into_iter",
-        "collect",
-        "filter",
-        "find",
-        "any",
-        "all",
-        "to_string",
-        "to_owned",
-        "as_str",
-        "as_bytes",
-        "parse",
-        "try_into",
-        "try_from",
-        // Async runtime
-        "async",
-        "await",
-        "spawn",
-        "block_on",
-        "tokio",
-        "async_std",
-    ];
-
-    // TypeScript/JavaScript built-ins
-    static JS_BUILTINS: &[&str] = &[
-        "console",
-        "log",
-        "error",
-        "warn",
-        "info",
-        "debug",
-        "Promise",
-        "async",
-        "await",
-        "setTimeout",
-        "setInterval",
-        "clearTimeout",
-        "clearInterval",
-        "Array",
-        "Object",
-        "String",
-        "Number",
-        "Boolean",
-        "Symbol",
-        "Map",
-        "Set",
-        "WeakMap",
-        "WeakSet",
-        "JSON",
-        "Math",
-        "Date",
-        "RegExp",
-        "Error",
-        "TypeError",
-        "RangeError",
-        "SyntaxError",
-        "parseInt",
-        "parseFloat",
-        "isNaN",
-        "isFinite",
-        "encodeURI",
-        "decodeURI",
-        "fetch",
-        "require",
-        "module",
-        "exports",
-        "process",
-    ];
-
-    // Python built-ins
-    static PYTHON_BUILTINS: &[&str] = &[
-        "print",
-        "len",
-        "range",
-        "str",
-        "int",
-        "float",
-        "bool",
-        "list",
-        "dict",
-        "set",
-        "tuple",
-        "open",
-        "input",
-        "type",
-        "isinstance",
-        "hasattr",
-        "getattr",
-        "setattr",
-        "delattr",
-        "sum",
-        "min",
-        "max",
-        "abs",
-        "round",
-        "sorted",
-        "reversed",
-        "enumerate",
-        "zip",
-        "map",
-        "filter",
-        "any",
-        "all",
-        "next",
-        "iter",
-        "super",
-        "property",
-        "classmethod",
-        "staticmethod",
-        "Exception",
-        "ValueError",
-        "TypeError",
-        "KeyError",
-        "IndexError",
-        "AttributeError",
-    ];
-
-    // Go built-ins
-    static GO_BUILTINS: &[&str] = &[
-        "fmt", "Println", "Printf", "Sprintf", "Errorf", "Print", "make", "new", "len", "cap",
-        "append", "copy", "delete", "close", "panic", "recover", "error", "nil",
-    ];
-
-    match language {
-        "rust" => RUST_BUILTINS.contains(&name),
-        "typescript" | "ts" | "javascript" | "js" => JS_BUILTINS.contains(&name),
-        "python" | "py" => PYTHON_BUILTINS.contains(&name),
-        "go" => GO_BUILTINS.contains(&name),
-        _ => false,
-    }
-}
-
 #[cfg(not(target_arch = "wasm32"))]
 pub struct CodeParser {
     parser: Parser,
     language: String,
+    builtin_detector: BuiltinDetector,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl CodeParser {
+    /// Create a new CodeParser with default builtin detection.
     pub fn new(language: &str) -> Result<Self> {
+        Self::with_builtin_detector(language, BuiltinDetector::with_defaults())
+    }
+
+    /// Create a new CodeParser with a custom BuiltinDetector.
+    pub fn with_builtin_detector(language: &str, builtin_detector: BuiltinDetector) -> Result<Self> {
         let mut parser = Parser::new();
         let lang: tree_sitter::Language = match language {
             "rust" => tree_sitter_rust::LANGUAGE.into(),
@@ -365,7 +42,18 @@ impl CodeParser {
         Ok(Self {
             parser,
             language: language.to_string(),
+            builtin_detector,
         })
+    }
+
+    /// Get a reference to the builtin detector.
+    pub fn builtin_detector(&self) -> &BuiltinDetector {
+        &self.builtin_detector
+    }
+
+    /// Set a custom builtin detector.
+    pub fn set_builtin_detector(&mut self, detector: BuiltinDetector) {
+        self.builtin_detector = detector;
     }
 
     pub fn parse_file(
@@ -479,7 +167,7 @@ impl CodeParser {
                             graph.add_weighted_dependency(file_path, text, "imports", 0.3);
                         } else if capture_name == "call" {
                             // Skip language built-ins that create noise in cycle detection
-                            if is_builtin_symbol(text, &self.language) {
+                            if self.builtin_detector.is_builtin(text, &self.language) {
                                 continue;
                             }
                             let mut strength = 0.6;
@@ -566,7 +254,7 @@ impl CodeParser {
                             graph.add_weighted_dependency(&id, file_path, "defined_in", 1.0);
                         } else if capture_name == "call" {
                             // Skip language built-ins that create noise in cycle detection
-                            if is_builtin_symbol(text, &self.language) {
+                            if self.builtin_detector.is_builtin(text, &self.language) {
                                 continue;
                             }
                             let mut strength = 0.6;
@@ -640,7 +328,7 @@ impl CodeParser {
                             graph.add_weighted_dependency(&id, file_path, "defined_in", 1.0);
                         } else if capture_name == "call" {
                             // Skip language built-ins that create noise in cycle detection
-                            if is_builtin_symbol(text, &self.language) {
+                            if self.builtin_detector.is_builtin(text, &self.language) {
                                 continue;
                             }
                             let mut strength = 0.6;
@@ -715,7 +403,7 @@ impl CodeParser {
                             graph.add_weighted_dependency(&id, file_path, "defined_in", 1.0);
                         } else if capture_name == "call" {
                             // Skip language built-ins that create noise in cycle detection
-                            if is_builtin_symbol(text, &self.language) {
+                            if self.builtin_detector.is_builtin(text, &self.language) {
                                 continue;
                             }
                             let mut strength = 0.6;
@@ -785,7 +473,7 @@ impl CodeParser {
                             graph.add_weighted_dependency(&id, file_path, "defined_in", 1.0);
                         } else if capture_name == "call" {
                             // Skip language built-ins that create noise in cycle detection
-                            if is_builtin_symbol(text, &self.language) {
+                            if self.builtin_detector.is_builtin(text, &self.language) {
                                 continue;
                             }
                             let mut strength = 0.6;

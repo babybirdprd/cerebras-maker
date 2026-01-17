@@ -187,6 +187,7 @@ impl AtomExecutor {
             AtomType::Planner => input.atom_type.system_prompt(),
             AtomType::Validator => input.atom_type.system_prompt(),
             AtomType::RLMProcessor => SystemPrompts::atom_rlm_processor(),
+            AtomType::WebResearcher => input.atom_type.system_prompt(),
         };
 
         // Add JSON output instruction if required

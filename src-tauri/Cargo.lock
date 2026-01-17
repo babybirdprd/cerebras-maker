@@ -697,9 +697,11 @@ dependencies = [
  "chrono",
  "crawl4ai-rs",
  "dirs 5.0.1",
+ "fastrand",
  "futures",
  "gix",
  "grits-core",
+ "log",
  "once_cell",
  "regex",
  "rhai",
@@ -726,6 +728,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "uuid",
+ "walkdir",
 ]
 
 [[package]]
@@ -2959,6 +2962,7 @@ dependencies = [
  "sha2",
  "streaming-iterator",
  "thiserror 1.0.69",
+ "toml 0.9.11+spec-1.1.0",
  "tracing",
  "tree-sitter",
  "tree-sitter-go",

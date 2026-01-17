@@ -27,6 +27,9 @@ pub enum AtomType {
     /// RLMProcessor atom - processes large contexts using Recursive LM patterns
     /// Based on: "Recursive Language Models: Scaling Context with Recursive Prompt Decomposition"
     RLMProcessor,
+    /// WebResearcher atom - performs web research using crawl4ai
+    /// Capable of crawling URLs, researching documentation, and extracting content
+    WebResearcher,
 }
 
 impl AtomType {
@@ -70,6 +73,12 @@ impl AtomType {
                  Use peek_context(), chunk_context(), and llm_query() to process context variables. \
                  Return a JSON object with 'answer', 'iterations', and 'sub_calls' fields."
             }
+            AtomType::WebResearcher => {
+                "You are a WebResearcher Atom. Your only job is to gather information from the web. \
+                 Use crawl_url(url) to fetch page content, research_docs(topic) to search multiple sources, \
+                 and extract_content(url, selector) for structured extraction. \
+                 Return a JSON object with 'sources', 'findings', and 'summary' fields."
+            }
         }
     }
 
@@ -85,6 +94,7 @@ impl AtomType {
             AtomType::Architect => 1500,
             AtomType::GritsAnalyzer => 1000,
             AtomType::RLMProcessor => 4000, // RLM needs more output for complex reasoning
+            AtomType::WebResearcher => 3000, // Web research may return substantial findings
         }
     }
 
@@ -100,6 +110,7 @@ impl AtomType {
             "architect" => Some(AtomType::Architect),
             "gritsanalyzer" | "grits" => Some(AtomType::GritsAnalyzer),
             "rlmprocessor" | "rlm" => Some(AtomType::RLMProcessor),
+            "webresearcher" | "researcher" | "web" => Some(AtomType::WebResearcher),
             _ => None,
         }
     }
@@ -116,6 +127,7 @@ impl AtomType {
             AtomType::Architect => "Architect",
             AtomType::GritsAnalyzer => "GritsAnalyzer",
             AtomType::RLMProcessor => "RLMProcessor",
+            AtomType::WebResearcher => "WebResearcher",
         }
     }
 }
