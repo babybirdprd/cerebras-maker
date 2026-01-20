@@ -1,15 +1,15 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { Upload, FileText, X, FolderOpen, Sparkles, Layers } from 'lucide-react';
 import { PRDFile } from '../types';
-import { listTemplates, ProjectTemplate } from '../hooks/useTauri';
+import { listTemplates, ProjectTemplate, openProjectDialog, createFromTemplate } from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface PRDUploadProps {
-  onUpload: (file: PRDFile) => void;
-  onOpenProject: () => void;
-  onSelectTemplate?: (template: ProjectTemplate) => void;
+  // No props needed after store migration
 }
 
-const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelectTemplate }) => {
+const PRDUpload: React.FC<PRDUploadProps> = () => {
+  const { setPrdFile, setCurrentView, setAgentState, setWorkspacePath } = useMakerStore();
   const [isDragging, setIsDragging] = useState(false);
   const [uploadedFile, setUploadedFile] = useState<PRDFile | null>(null);
   const [templates, setTemplates] = useState<ProjectTemplate[]>([]);
@@ -49,15 +49,15 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
       content,
       type: extension as 'md' | 'txt' | 'pdf',
     };
-    
+
     setUploadedFile(prdFile);
-    onUpload(prdFile);
-  }, [onUpload]);
+    setPrdFile(prdFile);
+  }, [setPrdFile]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     setIsDragging(false);
-    
+
     const file = e.dataTransfer.files[0];
     if (file) {
       processFile(file);
@@ -83,7 +83,7 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
       <div className="max-w-2xl w-full space-y-8">
         {/* Header */}
         <div className="text-center">
-          <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/30">
+          <div className="w-16 h-16 bg-linear-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg shadow-indigo-500/30">
             <Sparkles size={32} className="text-white" />
           </div>
           <h1 className="text-3xl font-bold text-white mb-2">Start Building</h1>
@@ -97,11 +97,10 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             onClick={() => fileInputRef.current?.click()}
-            className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all ${
-              isDragging
-                ? 'border-indigo-500 bg-indigo-500/10'
-                : 'border-zinc-700 hover:border-zinc-500 hover:bg-zinc-900/50'
-            }`}
+            className={`border-2 border-dashed rounded-xl p-12 text-center cursor-pointer transition-all ${isDragging
+              ? 'border-indigo-500 bg-indigo-500/10'
+              : 'border-zinc-700 hover:border-zinc-500 hover:bg-zinc-900/50'
+              }`}
           >
             <input
               ref={fileInputRef}
@@ -132,11 +131,10 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
                 <X size={20} />
               </button>
             </div>
-            <div className="bg-black rounded border border-zinc-800 p-4 max-h-48 overflow-y-auto scrollbar-thin">
-              <pre className="text-xs text-zinc-400 font-mono whitespace-pre-wrap">{uploadedFile.content.slice(0, 500)}...</pre>
-            </div>
-            <button className="w-full mt-4 py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-medium flex items-center justify-center gap-2">
-              <Sparkles size={18} />
+            <button
+              onClick={() => setCurrentView('interrogation')}
+              className="mt-6 w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl font-medium transition-all shadow-lg shadow-indigo-500/20"
+            >
               Analyze with L1 Orchestrator
             </button>
           </div>
@@ -151,7 +149,13 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
 
         {/* Open Existing Project */}
         <button
-          onClick={onOpenProject}
+          onClick={async () => {
+            const path = await openProjectDialog();
+            if (path) {
+              setWorkspacePath(path);
+              setCurrentView('topology');
+            }
+          }}
           className="w-full py-4 border border-zinc-700 hover:border-zinc-500 rounded-xl text-zinc-300 hover:text-white flex items-center justify-center gap-3 transition-all hover:bg-zinc-900/50"
         >
           <FolderOpen size={20} />
@@ -171,7 +175,14 @@ const PRDUpload: React.FC<PRDUploadProps> = ({ onUpload, onOpenProject, onSelect
               {templates.map((template) => (
                 <button
                   key={template.id}
-                  onClick={() => onSelectTemplate?.(template)}
+                  onClick={async () => {
+                    const path = await openProjectDialog();
+                    if (path) {
+                      await createFromTemplate(template.id, path, template.name.toLowerCase().replace(/\s+/g, '-'));
+                      setWorkspacePath(path);
+                      setCurrentView('topology');
+                    }
+                  }}
                   className="p-4 border border-zinc-700 hover:border-indigo-500 rounded-xl text-left transition-all hover:bg-zinc-900/50 group"
                 >
                   <div className="flex items-center gap-2 mb-2">

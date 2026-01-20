@@ -1,20 +1,15 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Send, Bot, User, Loader2 } from 'lucide-react';
-import { ChatMessage } from '../types';
+import { useMakerStore } from '../store/makerStore';
 
 interface ChatInputProps {
-  messages: ChatMessage[];
-  onSendMessage: (message: string) => void;
-  isLoading?: boolean;
   placeholder?: string;
 }
 
-const ChatInput: React.FC<ChatInputProps> = ({ 
-  messages, 
-  onSendMessage, 
-  isLoading = false,
-  placeholder = "Type your response..." 
+const ChatInput: React.FC<ChatInputProps> = ({
+  placeholder = "Type your response..."
 }) => {
+  const { chatMessages: messages, isLoading, sendMessage: onSendMessage } = useMakerStore();
   const [input, setInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -63,22 +58,20 @@ const ChatInput: React.FC<ChatInputProps> = ({
             key={msg.id}
             className={`flex gap-3 ${msg.role === 'user' ? 'flex-row-reverse' : ''}`}
           >
-            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-              msg.role === 'assistant' 
-                ? 'bg-indigo-600' 
-                : 'bg-zinc-700'
-            }`}>
+            <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${msg.role === 'assistant'
+              ? 'bg-indigo-600'
+              : 'bg-zinc-700'
+              }`}>
               {msg.role === 'assistant' ? (
                 <Bot size={16} className="text-white" />
               ) : (
                 <User size={16} className="text-white" />
               )}
             </div>
-            <div className={`max-w-[80%] rounded-xl px-4 py-3 ${
-              msg.role === 'assistant'
-                ? 'bg-zinc-800 border border-zinc-700'
-                : 'bg-indigo-600'
-            }`}>
+            <div className={`max-w-[80%] rounded-xl px-4 py-3 ${msg.role === 'assistant'
+              ? 'bg-zinc-800 border border-zinc-700'
+              : 'bg-indigo-600'
+              }`}>
               <p className="text-sm text-white whitespace-pre-wrap">{msg.content}</p>
               <span className="text-[10px] text-zinc-500 mt-1 block">
                 {msg.timestamp.toLocaleTimeString()}
@@ -86,7 +79,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
             </div>
           </div>
         ))}
-        
+
         {isLoading && (
           <div className="flex gap-3">
             <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center">

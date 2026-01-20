@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Maximum cache size to prevent memory issues
+#[allow(dead_code)]
 const MAX_CACHE_SIZE: usize = 100;
 
 /// Supported languages for AST parsing
@@ -91,6 +92,7 @@ impl AstEditor {
     }
 
     /// Evict cache if it exceeds the maximum size to prevent memory issues
+    #[allow(dead_code)]
     fn maybe_evict_cache(&mut self) {
         if self.cache.len() > MAX_CACHE_SIZE {
             // Remove oldest entries (just clear for simplicity)
@@ -100,7 +102,11 @@ impl AstEditor {
 
     /// Validate syntax of code content using pattern-based heuristics
     /// This is a lightweight validation that catches common syntax errors
-    pub fn validate_syntax(&self, code: &str, language: SupportedLanguage) -> SyntaxValidationResult {
+    pub fn validate_syntax(
+        &self,
+        code: &str,
+        language: SupportedLanguage,
+    ) -> SyntaxValidationResult {
         let errors = self.check_syntax_patterns(code, language);
         let structure_count = self.count_structures(code, language);
 
@@ -158,7 +164,10 @@ impl AstEditor {
                         if let Some((open, _, _)) = stack.pop() {
                             if open != '(' {
                                 errors.push(SyntaxError {
-                                    message: format!("Mismatched bracket: expected ')', found '{}'", open),
+                                    message: format!(
+                                        "Mismatched bracket: expected ')', found '{}'",
+                                        open
+                                    ),
                                     line: line_num + 1,
                                     column: col + 1,
                                     snippet: Some(line.to_string()),
@@ -177,7 +186,10 @@ impl AstEditor {
                         if let Some((open, _, _)) = stack.pop() {
                             if open != '[' {
                                 errors.push(SyntaxError {
-                                    message: format!("Mismatched bracket: expected ']', found '{}'", open),
+                                    message: format!(
+                                        "Mismatched bracket: expected ']', found '{}'",
+                                        open
+                                    ),
                                     line: line_num + 1,
                                     column: col + 1,
                                     snippet: Some(line.to_string()),
@@ -196,7 +208,10 @@ impl AstEditor {
                         if let Some((open, _, _)) = stack.pop() {
                             if open != '{' {
                                 errors.push(SyntaxError {
-                                    message: format!("Mismatched bracket: expected '}}', found '{}'", open),
+                                    message: format!(
+                                        "Mismatched bracket: expected '}}', found '{}'",
+                                        open
+                                    ),
                                     line: line_num + 1,
                                     column: col + 1,
                                     snippet: Some(line.to_string()),
@@ -278,7 +293,10 @@ impl AstEditor {
             let trimmed = line.trim();
 
             // Check for missing colons after def/class/if/for/while
-            let keywords = ["def ", "class ", "if ", "elif ", "else", "for ", "while ", "try", "except", "finally", "with "];
+            let keywords = [
+                "def ", "class ", "if ", "elif ", "else", "for ", "while ", "try", "except",
+                "finally", "with ",
+            ];
             for kw in keywords {
                 if trimmed.starts_with(kw) && !trimmed.ends_with(':') && !trimmed.contains('#') {
                     errors.push(SyntaxError {
@@ -309,17 +327,23 @@ impl AstEditor {
 
             match language {
                 SupportedLanguage::Rust => {
-                    if trimmed.starts_with("fn ") || trimmed.starts_with("pub fn ")
-                        || trimmed.starts_with("struct ") || trimmed.starts_with("pub struct ")
-                        || trimmed.starts_with("enum ") || trimmed.starts_with("pub enum ")
-                        || trimmed.starts_with("impl ") || trimmed.starts_with("trait ")
+                    if trimmed.starts_with("fn ")
+                        || trimmed.starts_with("pub fn ")
+                        || trimmed.starts_with("struct ")
+                        || trimmed.starts_with("pub struct ")
+                        || trimmed.starts_with("enum ")
+                        || trimmed.starts_with("pub enum ")
+                        || trimmed.starts_with("impl ")
+                        || trimmed.starts_with("trait ")
                     {
                         count += 1;
                     }
                 }
                 SupportedLanguage::TypeScript | SupportedLanguage::JavaScript => {
-                    if trimmed.starts_with("function ") || trimmed.contains("=> {")
-                        || trimmed.starts_with("class ") || trimmed.starts_with("interface ")
+                    if trimmed.starts_with("function ")
+                        || trimmed.contains("=> {")
+                        || trimmed.starts_with("class ")
+                        || trimmed.starts_with("interface ")
                     {
                         count += 1;
                     }
@@ -403,7 +427,12 @@ impl AstEditor {
     }
 
     /// Check if code contains a specific text pattern
-    pub fn contains_pattern(&self, code: &str, pattern: &str, _language: SupportedLanguage) -> bool {
+    pub fn contains_pattern(
+        &self,
+        code: &str,
+        pattern: &str,
+        _language: SupportedLanguage,
+    ) -> bool {
         code.contains(pattern)
     }
 }
@@ -439,10 +468,22 @@ function greet(name: string): string {
 
     #[test]
     fn test_language_from_extension() {
-        assert_eq!(SupportedLanguage::from_extension("rs"), Some(SupportedLanguage::Rust));
-        assert_eq!(SupportedLanguage::from_extension("ts"), Some(SupportedLanguage::TypeScript));
-        assert_eq!(SupportedLanguage::from_extension("py"), Some(SupportedLanguage::Python));
-        assert_eq!(SupportedLanguage::from_extension("go"), Some(SupportedLanguage::Go));
+        assert_eq!(
+            SupportedLanguage::from_extension("rs"),
+            Some(SupportedLanguage::Rust)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("ts"),
+            Some(SupportedLanguage::TypeScript)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("py"),
+            Some(SupportedLanguage::Python)
+        );
+        assert_eq!(
+            SupportedLanguage::from_extension("go"),
+            Some(SupportedLanguage::Go)
+        );
         assert_eq!(SupportedLanguage::from_extension("unknown"), None);
     }
 
@@ -458,4 +499,3 @@ fn bar(x: i32) -> i32 { x }
         assert!(functions.contains(&"bar".to_string()));
     }
 }
-

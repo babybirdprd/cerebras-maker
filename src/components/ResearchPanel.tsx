@@ -1,13 +1,14 @@
 import { useState } from 'react';
 import { Globe, Search, FileText, Loader2, ExternalLink, AlertCircle, CheckCircle2, X } from 'lucide-react';
-import { crawlUrl, researchDocs, CrawlResult, ResearchResult } from '../hooks/useTauri';
+import { crawlUrl, researchDocs, CrawlResult, ResearchResult } from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface ResearchPanelProps {
-  onResearchComplete?: (content: string) => void;
   className?: string;
 }
 
-const ResearchPanel: React.FC<ResearchPanelProps> = ({ onResearchComplete, className = '' }) => {
+const ResearchPanel: React.FC<ResearchPanelProps> = ({ className = '' }) => {
+  const { setResearchContext } = useMakerStore();
   const [urls, setUrls] = useState<string[]>(['']);
   const [isLoading, setIsLoading] = useState(false);
   const [results, setResults] = useState<ResearchResult | null>(null);
@@ -33,8 +34,8 @@ const ResearchPanel: React.FC<ResearchPanelProps> = ({ onResearchComplete, class
     try {
       const result = await crawlUrl(url.trim(), true);
       setSingleResult(result);
-      if (result.markdown && onResearchComplete) {
-        onResearchComplete(result.markdown);
+      if (result.markdown) {
+        setResearchContext(result.markdown);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to crawl URL');
@@ -56,11 +57,11 @@ const ResearchPanel: React.FC<ResearchPanelProps> = ({ onResearchComplete, class
     try {
       const res = await researchDocs(validUrls);
       setResults(res);
-      if (res.documents.length > 0 && onResearchComplete) {
+      if (res.documents.length > 0) {
         const combinedMarkdown = res.documents
           .map(d => `# ${d.title || d.url}\n\n${d.markdown || '(No content)'}`)
           .join('\n\n---\n\n');
-        onResearchComplete(combinedMarkdown);
+        setResearchContext(combinedMarkdown);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Research failed');

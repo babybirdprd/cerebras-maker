@@ -9,10 +9,10 @@ import {
   kbGetDocuments,
   kbCompileContext,
   kbGetStats,
-} from '../hooks/useTauri';
+} from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface KnowledgePanelProps {
-  onContextChange?: (context: string) => void;
   className?: string;
 }
 
@@ -26,7 +26,8 @@ const DOC_TYPES = [
   { id: 'other', label: 'Other' },
 ];
 
-const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ onContextChange, className = '' }) => {
+const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ className = '' }) => {
+  const { setKbContext } = useMakerStore();
   const [documents, setDocuments] = useState<KnowledgeDocument[]>([]);
   const [stats, setStats] = useState<KnowledgeBaseStats | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -113,7 +114,7 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ onContextChange, classN
       const context = await kbCompileContext();
       setPreviewContent(context);
       setShowPreview(true);
-      onContextChange?.(context);
+      setKbContext(context);
     } catch (e) {
       console.error('Failed to compile context:', e);
     }
@@ -205,9 +206,8 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ onContextChange, classN
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => fileInputRef.current?.click()}
-        className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-all mb-4 ${
-          isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-zinc-700 hover:border-zinc-500'
-        }`}
+        className={`border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-all mb-4 ${isDragging ? 'border-indigo-500 bg-indigo-500/10' : 'border-zinc-700 hover:border-zinc-500'
+          }`}
       >
         <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" />
         {isLoading ? (
@@ -237,16 +237,16 @@ const KnowledgePanel: React.FC<KnowledgePanelProps> = ({ onContextChange, classN
               <div key={doc.id} className="bg-black border border-zinc-800 rounded-lg p-3 flex items-center justify-between group">
                 <div className="flex items-center gap-3 flex-1 min-w-0">
                   {doc.doc_type === 'web_research' || doc.doc_type === 'WebResearch' ? (
-                    <Globe size={16} className="text-cyan-400 flex-shrink-0" />
+                    <Globe size={16} className="text-cyan-400 shrink-0" />
                   ) : (
-                    <FileText size={16} className="text-indigo-400 flex-shrink-0" />
+                    <FileText size={16} className="text-indigo-400 shrink-0" />
                   )}
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2">
                       <p className="text-white text-sm truncate">{doc.name}</p>
                       {doc.auto_classified && (
                         <span title="Auto-classified">
-                          <Sparkles size={12} className="text-amber-400 flex-shrink-0" />
+                          <Sparkles size={12} className="text-amber-400 shrink-0" />
                         </span>
                       )}
                     </div>

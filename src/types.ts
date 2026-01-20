@@ -1,3 +1,5 @@
+export type ViewType = 'dashboard' | 'topology' | 'execution' | 'history' | 'upload' | 'interrogation' | 'validation' | 'tests' | 'sessions' | 'threads';
+
 export enum AgentState {
   IDLE = 'IDLE',
   PLANNING = 'PLANNING', // System 2

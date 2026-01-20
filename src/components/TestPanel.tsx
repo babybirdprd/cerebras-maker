@@ -21,13 +21,15 @@ import {
   TestFrameworkInfo,
   TestExecutionResult,
   GeneratedTest
-} from '../hooks/useTauri';
+} from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface TestPanelProps {
-  workspacePath: string;
+  className?: string; // Optional if needed
 }
 
-export const TestPanel: React.FC<TestPanelProps> = ({ workspacePath }) => {
+export const TestPanel: React.FC<TestPanelProps> = () => {
+  const { workspacePath } = useMakerStore();
   const [framework, setFramework] = useState<TestFrameworkInfo | null>(null);
   const [testResult, setTestResult] = useState<TestExecutionResult | null>(null);
   const [generatedTest, setGeneratedTest] = useState<GeneratedTest | null>(null);
@@ -124,21 +126,19 @@ export const TestPanel: React.FC<TestPanelProps> = ({ workspacePath }) => {
       <div className="flex mb-4 border-b border-zinc-700">
         <button
           onClick={() => setActiveTab('run')}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'run'
-              ? 'text-indigo-400 border-b-2 border-indigo-400'
-              : 'text-zinc-400 hover:text-white'
-          }`}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${activeTab === 'run'
+            ? 'text-indigo-400 border-b-2 border-indigo-400'
+            : 'text-zinc-400 hover:text-white'
+            }`}
         >
           <Play size={14} className="inline mr-1" /> Run Tests
         </button>
         <button
           onClick={() => setActiveTab('generate')}
-          className={`px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'generate'
-              ? 'text-indigo-400 border-b-2 border-indigo-400'
-              : 'text-zinc-400 hover:text-white'
-          }`}
+          className={`px-4 py-2 text-sm font-medium transition-colors ${activeTab === 'generate'
+            ? 'text-indigo-400 border-b-2 border-indigo-400'
+            : 'text-zinc-400 hover:text-white'
+            }`}
         >
           <Sparkles size={14} className="inline mr-1" /> Generate Tests
         </button>
@@ -289,7 +289,7 @@ export const TestPanel: React.FC<TestPanelProps> = ({ workspacePath }) => {
       {/* Error Display */}
       {error && (
         <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-          <AlertCircle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+          <AlertCircle size={16} className="text-red-400 mt-0.5 shrink-0" />
           <span className="text-red-300 text-sm">{error}</span>
         </div>
       )}
@@ -297,3 +297,4 @@ export const TestPanel: React.FC<TestPanelProps> = ({ workspacePath }) => {
   );
 };
 
+export default TestPanel;

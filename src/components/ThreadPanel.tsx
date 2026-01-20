@@ -25,7 +25,7 @@ import {
   listThreads,
   replyToThread,
   resolveThread as resolveThreadApi,
-} from '../hooks/useTauri';
+} from '../tauri-api';
 
 interface ThreadPanelProps {
   className?: string;
@@ -247,12 +247,12 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
           prev.map((t) =>
             t.id === selectedThreadId
               ? {
-                  ...t,
-                  messages: [...t.messages, newMessage],
-                  updated_at: new Date(),
-                  status: 'pending' as ThreadStatus,
-                  is_blocking: false,
-                }
+                ...t,
+                messages: [...t.messages, newMessage],
+                updated_at: new Date(),
+                status: 'pending' as ThreadStatus,
+                is_blocking: false,
+              }
               : t
           )
         );
@@ -282,12 +282,12 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
           prev.map((t) =>
             t.id === selectedThreadId
               ? {
-                  ...t,
-                  status: 'resolved' as ThreadStatus,
-                  resolved_at: new Date(),
-                  updated_at: new Date(),
-                  is_blocking: false,
-                }
+                ...t,
+                status: 'resolved' as ThreadStatus,
+                resolved_at: new Date(),
+                updated_at: new Date(),
+                is_blocking: false,
+              }
               : t
           )
         );
@@ -348,11 +348,10 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
               <button
                 key={status}
                 onClick={() => setStatusFilter(status)}
-                className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${
-                  statusFilter === status
-                    ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
-                    : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 border border-transparent'
-                }`}
+                className={`px-3 py-1.5 text-xs rounded-lg transition-colors ${statusFilter === status
+                  ? 'bg-indigo-500/20 text-indigo-400 border border-indigo-500/30'
+                  : 'bg-zinc-800 text-zinc-400 hover:bg-zinc-700 border border-transparent'
+                  }`}
               >
                 {status === 'all' ? 'All' : status.charAt(0).toUpperCase() + status.slice(1)}
               </button>
@@ -372,11 +371,10 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
               <button
                 key={thread.id}
                 onClick={() => setSelectedThreadId(thread.id)}
-                className={`w-full p-4 text-left border-b border-zinc-800 transition-colors ${
-                  selectedThreadId === thread.id
-                    ? 'bg-indigo-500/10 border-l-2 border-l-indigo-500'
-                    : 'hover:bg-zinc-800/50'
-                }`}
+                className={`w-full p-4 text-left border-b border-zinc-800 transition-colors ${selectedThreadId === thread.id
+                  ? 'bg-indigo-500/10 border-l-2 border-l-indigo-500'
+                  : 'hover:bg-zinc-800/50'
+                  }`}
               >
                 <div className="flex items-start justify-between gap-2 mb-2">
                   <div className="flex items-center gap-2 min-w-0">
@@ -461,9 +459,8 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
                   key={msg.id}
                   className={`flex gap-3 ${msg.role === 'human' ? 'flex-row-reverse' : ''}`}
                 >
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${
-                    msg.role === 'agent' ? 'bg-indigo-600' : 'bg-zinc-700'
-                  }`}>
+                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${msg.role === 'agent' ? 'bg-indigo-600' : 'bg-zinc-700'
+                    }`}>
                     {msg.role === 'agent' ? <Bot size={16} className="text-white" /> : <User size={16} className="text-white" />}
                   </div>
 
@@ -472,11 +469,10 @@ const ThreadPanel: React.FC<ThreadPanelProps> = ({ className = '' }) => {
                       <span className="text-xs text-indigo-400 mb-1 block">{msg.agent_name}</span>
                     )}
 
-                    <div className={`rounded-xl px-4 py-3 ${
-                      msg.role === 'agent'
-                        ? 'bg-zinc-800 border border-zinc-700'
-                        : 'bg-indigo-600'
-                    }`}>
+                    <div className={`rounded-xl px-4 py-3 ${msg.role === 'agent'
+                      ? 'bg-zinc-800 border border-zinc-700'
+                      : 'bg-indigo-600'
+                      }`}>
                       <p className="text-sm text-white whitespace-pre-wrap">{msg.content}</p>
 
                       {msg.attachments && msg.attachments.length > 0 && (

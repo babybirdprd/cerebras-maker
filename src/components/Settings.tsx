@@ -2,13 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { X, Save, RotateCcw, Key, Cpu, Loader2, ChevronDown, Check, Link as LinkIcon, Zap, Sparkles, Bot, Code, Eye, TestTube, Thermometer, RefreshCw, Layers, Hash, FileText } from 'lucide-react';
 import { DEFAULT_AGENT_CONFIG } from '../constants';
 import { AgentConfig, ProviderConfig } from '../types';
-import { saveSettings, loadSettings, ApiKeys } from '../hooks/useTauri';
-import { RLMConfig } from '../store/makerStore';
+import { saveSettings, loadSettings, ApiKeys, AppSettings } from '../tauri-api';
+import { RLMConfig, useMakerStore } from '../store/makerStore';
 
-interface SettingsProps {
-  isOpen: boolean;
-  onClose: () => void;
-}
 
 // --- Provider Data Configuration ---
 type FieldType = 'apiKey' | 'baseUrl';
@@ -126,31 +122,39 @@ const ProviderLogo: React.FC<{ provider: string; size?: 'sm' | 'md' | 'lg' }> = 
     lg: 'w-12 h-12',
   };
 
+  // Try dark mode variant first, then fallback to standard
   return (
-    <img
-      src={`https://models.dev/logos/${provider}.svg`}
-      alt={`${provider} logo`}
-      className={`${sizeClasses[size]} object-contain`}
-      onError={(e) => {
-        // Fallback to a generic icon if logo fails to load
-        e.currentTarget.style.display = 'none';
-      }}
-    />
+    <div className={`${sizeClasses[size]} flex items-center justify-center`}>
+      <img
+        src={`https://models.dev/logos/${provider}-dark.svg`}
+        alt={`${provider} logo`}
+        className={`${sizeClasses[size]} object-contain`}
+        onError={(e) => {
+          const target = e.currentTarget;
+          if (target.src.includes('-dark.svg')) {
+            target.src = `https://models.dev/logos/${provider}.svg`;
+          } else {
+            target.style.display = 'none';
+          }
+        }}
+      />
+    </div>
   );
 };
 
 const AgentConfigRow: React.FC<{
   agentKey: keyof AgentConfig;
   config: ProviderConfig;
+  availableModels: string[];
   onChange: (key: keyof AgentConfig, config: ProviderConfig) => void;
-}> = ({ agentKey, config, onChange }) => {
+}> = ({ agentKey, config, availableModels, onChange }) => {
   const info = AGENT_LABELS[agentKey];
   const providerConfig = PROVIDERS_CONFIG[config.provider as ProviderId] || PROVIDERS_CONFIG.openai;
 
   return (
     <div className="group relative bg-zinc-900/50 hover:bg-zinc-800/50 rounded-xl p-4 transition-all duration-200 border border-zinc-800/50 hover:border-zinc-700">
       {/* Accent line */}
-      <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l-xl bg-gradient-to-b ${providerConfig.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
+      <div className={`absolute left-0 top-0 bottom-0 w-1 rounded-l-xl bg-linear-to-b ${providerConfig.color} opacity-60 group-hover:opacity-100 transition-opacity`} />
 
       <div className="flex items-start gap-4 pl-3">
         {/* Agent info */}
@@ -196,7 +200,7 @@ const AgentConfigRow: React.FC<{
               onChange={(e) => onChange(agentKey, { ...config, model: e.target.value })}
               className="appearance-none bg-zinc-800 border border-zinc-700 rounded-lg pl-3 pr-8 py-1.5 text-xs text-white focus:outline-none focus:ring-2 focus:ring-zinc-600 cursor-pointer hover:border-zinc-600 transition-colors min-w-[180px]"
             >
-              {MODELS[config.provider]?.map(m => <option key={m} value={m}>{m}</option>)}
+              {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
             </select>
             <ChevronDown size={12} className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 pointer-events-none" />
           </div>
@@ -241,7 +245,9 @@ const setProviderApiKey = (keys: ExtendedApiKeys, provider: string, value: strin
   return { ...keys, [provider]: value };
 };
 
-const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
+const Settings: React.FC = () => {
+  const { settingsOpen: isOpen, setSettingsOpen } = useMakerStore();
+  const onClose = () => setSettingsOpen(false);
   const [config, setConfig] = useState<AgentConfig>(DEFAULT_AGENT_CONFIG as AgentConfig);
   const [apiKeys, setApiKeys] = useState<ExtendedApiKeys>({
     openai: '',
@@ -255,6 +261,39 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<'providers' | 'agents' | 'rlm'>('providers');
+  const [providerModels, setProviderModels] = useState<Record<string, string[]>>(() =>
+    Object.fromEntries(Object.entries(PROVIDERS_CONFIG).map(([k, v]) => [k, [...v.models]]))
+  );
+
+  // Fetch models from models.dev on mount
+  useEffect(() => {
+    const fetchModels = async () => {
+      try {
+        const response = await fetch('https://models.dev/api.json');
+        if (!response.ok) throw new Error('Failed to fetch models');
+        const data = await response.json();
+
+        const updatedModels: Record<string, string[]> = { ...providerModels };
+        const supportedProviders = Object.keys(PROVIDERS_CONFIG);
+
+        supportedProviders.forEach(providerId => {
+          const providerData = data[providerId];
+          if (providerData && providerData.models) {
+            const modelNames = Object.keys(providerData.models);
+            if (modelNames.length > 0) {
+              updatedModels[providerId] = modelNames;
+            }
+          }
+        });
+
+        setProviderModels(updatedModels);
+      } catch (err) {
+        console.error('Error fetching models from models.dev:', err);
+      }
+    };
+
+    fetchModels();
+  }, []);
   const [rlmConfig, setRlmConfig] = useState<RLMConfig>({
     max_depth: 3,
     max_iterations: 10,
@@ -267,7 +306,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
   useEffect(() => {
     if (isOpen) {
       setIsLoading(true);
-      loadSettings().then((settings) => {
+      loadSettings().then((settings: AppSettings | null) => {
         if (settings) {
           setConfig(settings.agent_config);
           setApiKeys(prev => ({ ...prev, ...settings.api_keys }));
@@ -317,7 +356,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
       <div className="bg-zinc-950 border border-zinc-800 rounded-3xl w-full max-w-5xl max-h-[90vh] overflow-hidden flex flex-col shadow-2xl">
 
         {/* Decorative Top Gradient */}
-        <div className={`h-1.5 bg-gradient-to-r ${currentProviderData.color}`} />
+        <div className={`h-1.5 bg-linear-to-r ${currentProviderData.color}`} />
 
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800/50">
@@ -342,31 +381,28 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
         <div className="flex border-b border-zinc-800/50 px-6">
           <button
             onClick={() => setActiveTab('providers')}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === 'providers'
-                ? 'border-white text-white'
-                : 'border-transparent text-zinc-500 hover:text-zinc-300'
-            }`}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'providers'
+              ? 'border-white text-white'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              }`}
           >
             Providers & API Keys
           </button>
           <button
             onClick={() => setActiveTab('agents')}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-              activeTab === 'agents'
-                ? 'border-white text-white'
-                : 'border-transparent text-zinc-500 hover:text-zinc-300'
-            }`}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors ${activeTab === 'agents'
+              ? 'border-white text-white'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              }`}
           >
             Agent Configuration
           </button>
           <button
             onClick={() => setActiveTab('rlm')}
-            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${
-              activeTab === 'rlm'
-                ? 'border-violet-400 text-violet-400'
-                : 'border-transparent text-zinc-500 hover:text-zinc-300'
-            }`}
+            className={`px-4 py-3 text-sm font-medium border-b-2 transition-colors flex items-center gap-2 ${activeTab === 'rlm'
+              ? 'border-violet-400 text-violet-400'
+              : 'border-transparent text-zinc-500 hover:text-zinc-300'
+              }`}
           >
             <RefreshCw size={14} />
             RLM Settings
@@ -501,7 +537,13 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                 Configure which provider and model each agent should use. Each agent can use a different provider.
               </p>
               {(Object.keys(AGENT_LABELS) as Array<keyof AgentConfig>).map(key => (
-                <AgentConfigRow key={key} agentKey={key} config={config[key]} onChange={handleAgentChange} />
+                <AgentConfigRow
+                  key={key}
+                  agentKey={key}
+                  config={config[key]}
+                  availableModels={providerModels[config[key].provider] || []}
+                  onChange={handleAgentChange}
+                />
               ))}
             </div>
           ) : (
@@ -620,7 +662,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
                       onChange={(e) => setRlmConfig(prev => ({ ...prev, sub_model_name: e.target.value }))}
                       className="w-full bg-zinc-800 border border-zinc-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:ring-2 focus:ring-violet-500/50"
                     >
-                      {(MODELS[rlmConfig.sub_model_provider] || []).map(m => (
+                      {(providerModels[rlmConfig.sub_model_provider] || []).map(m => (
                         <option key={m} value={m}>{m}</option>
                       ))}
                     </select>
@@ -673,7 +715,7 @@ const Settings: React.FC<SettingsProps> = ({ isOpen, onClose }) => {
             <button
               onClick={handleSave}
               disabled={isSaving || isLoading}
-              className={`flex items-center gap-2 px-6 py-2.5 bg-gradient-to-r ${currentProviderData.color} hover:opacity-90 disabled:opacity-50 text-white rounded-xl text-sm font-medium transition-all shadow-lg`}
+              className={`flex items-center gap-2 px-6 py-2.5 bg-linear-to-r ${currentProviderData.color} hover:opacity-90 disabled:opacity-50 text-white rounded-xl text-sm font-medium transition-all shadow-lg`}
             >
               {isSaving ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
               {isSaving ? 'Saving...' : 'Save Changes'}

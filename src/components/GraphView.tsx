@@ -1,14 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import * as d3 from 'd3';
 import { Share2 } from 'lucide-react';
-import { GraphNode, GraphLink } from '../types';
+import { useMakerStore } from '../store/makerStore';
 
-interface GraphViewProps {
-  nodes: GraphNode[];
-  links: GraphLink[];
-}
-
-const GraphView: React.FC<GraphViewProps> = ({ nodes, links }) => {
+const GraphView: React.FC = () => {
+  const { graphNodes: nodes, graphLinks: links } = useMakerStore();
   const svgRef = useRef<SVGSVGElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const [dimensions, setDimensions] = useState({ width: 0, height: 0 });
@@ -127,15 +123,15 @@ const GraphView: React.FC<GraphViewProps> = ({ nodes, links }) => {
 
   return (
     <div ref={containerRef} className="w-full h-full bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800 relative">
-        <div className="absolute top-4 left-4 z-10 bg-zinc-900/80 p-2 rounded backdrop-blur-sm border border-zinc-700 pointer-events-none">
-            <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Topology Analysis (Grits)</h3>
-            <div className="flex flex-wrap gap-2 text-xs">
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-500"></span> Logic</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span> Data</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500"></span> UI</span>
-                <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500"></span> Ext</span>
-            </div>
+      <div className="absolute top-4 left-4 z-10 bg-zinc-900/80 p-2 rounded backdrop-blur-sm border border-zinc-700 pointer-events-none">
+        <h3 className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-1">Topology Analysis (Grits)</h3>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-indigo-500"></span> Logic</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-emerald-500"></span> Data</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-amber-500"></span> UI</span>
+          <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-pink-500"></span> Ext</span>
         </div>
+      </div>
       {hasData ? (
         <svg ref={svgRef} className="w-full h-full"></svg>
       ) : (

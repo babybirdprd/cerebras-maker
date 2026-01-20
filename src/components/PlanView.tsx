@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { Circle, CheckCircle2, CircleDashed, ChevronRight, ChevronDown, FileText, AlertTriangle, Code, StickyNote, Hash, RefreshCw, ListTodo } from 'lucide-react';
 import { Task } from '../types';
-import { parsePlan, ParsedPlan, ParsedTask } from '../hooks/useTauri';
+import { parsePlan, ParsedPlan, ParsedTask } from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 const StatusIcon = ({ status }: { status: Task['status'] }) => {
   switch (status) {
@@ -26,7 +27,7 @@ const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
 
   const toggleDetails = () => {
     if (hasDetails) {
-        setDetailsExpanded(!detailsExpanded);
+      setDetailsExpanded(!detailsExpanded);
     }
   };
 
@@ -34,70 +35,70 @@ const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
     ? 'bg-gradient-to-r from-indigo-500/20 to-transparent border-l-2 border-indigo-500 shadow-[inset_0_0_20px_rgba(99,102,241,0.05)]'
     : 'border-l-2 border-transparent hover:bg-zinc-800/50';
 
-  const textClasses = task.status === 'active' 
-    ? 'text-white font-semibold drop-shadow-[0_0_5px_rgba(255,255,255,0.3)]' 
+  const textClasses = task.status === 'active'
+    ? 'text-white font-semibold drop-shadow-[0_0_5px_rgba(255,255,255,0.3)]'
     : 'text-zinc-400 group-hover:text-zinc-200';
 
   return (
     <div className="select-none mb-1">
-      <div 
+      <div
         className={`relative flex items-center gap-2 py-2.5 px-2 rounded-r cursor-pointer group transition-all duration-200 ${containerClasses} ${detailsExpanded ? 'bg-zinc-800/30' : ''}`}
         style={{ paddingLeft: `${task.depth * 16 + 8}px` }}
         onClick={toggleDetails}
       >
-        <div 
-            className={`flex-shrink-0 w-4 h-4 flex items-center justify-center text-zinc-500 hover:text-white transition-colors ${!hasChildren ? 'invisible' : ''}`}
-            onClick={toggleChildren}
+        <div
+          className={`shrink-0 w-4 h-4 flex items-center justify-center text-zinc-500 hover:text-white transition-colors ${!hasChildren ? 'invisible' : ''}`}
+          onClick={toggleChildren}
         >
-             {childrenExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+          {childrenExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </div>
-        
+
         <StatusIcon status={task.status} />
-        
+
         <span className={`text-sm font-mono truncate ${textClasses}`}>
           {task.title}
         </span>
-        
+
         {task.status === 'active' && (
-             <span className="ml-auto text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded font-bold uppercase tracking-wider hidden sm:inline-block shadow-lg shadow-indigo-500/20 animate-pulse">
-                 Active
-             </span>
+          <span className="ml-auto text-[10px] bg-indigo-600 text-white px-2 py-0.5 rounded font-bold uppercase tracking-wider hidden sm:inline-block shadow-lg shadow-indigo-500/20 animate-pulse">
+            Active
+          </span>
         )}
       </div>
 
       {detailsExpanded && hasDetails && (
-          <div 
-            className="my-1 mr-2 bg-black/40 rounded border border-zinc-800/60 p-3 text-xs flex flex-col gap-3 shadow-inner"
-            style={{ marginLeft: `${task.depth * 16 + 32}px` }}
-          >
-              {task.details?.notes && (
-                  <div className="flex gap-2">
-                      <StickyNote size={14} className="text-zinc-500 shrink-0 mt-0.5" />
-                      <p className="text-zinc-300 italic">{task.details.notes}</p>
-                  </div>
-              )}
-              {task.details?.issues && task.details.issues.length > 0 && (
-                  <div className="flex gap-2">
-                      <Hash size={14} className="text-zinc-500 shrink-0 mt-0.5" />
-                      <div className="flex flex-col gap-1">
-                          {task.details.issues.map((issue, idx) => (
-                              <span key={idx} className="text-indigo-400 hover:text-indigo-300 underline cursor-pointer">{issue}</span>
-                          ))}
-                      </div>
-                  </div>
-              )}
-              {task.details?.snippet && (
-                  <div className="flex flex-col gap-2 mt-1">
-                      <div className="flex items-center gap-2 text-zinc-500">
-                          <Code size={14} />
-                          <span className="text-[10px] uppercase font-bold tracking-wider">Relevant Context</span>
-                      </div>
-                      <div className="bg-zinc-950 p-2 rounded border border-zinc-800 font-mono text-zinc-400 overflow-x-auto">
-                          <pre>{task.details.snippet}</pre>
-                      </div>
-                  </div>
-              )}
-          </div>
+        <div
+          className="my-1 mr-2 bg-black/40 rounded border border-zinc-800/60 p-3 text-xs flex flex-col gap-3 shadow-inner"
+          style={{ marginLeft: `${task.depth * 16 + 32}px` }}
+        >
+          {task.details?.notes && (
+            <div className="flex gap-2">
+              <StickyNote size={14} className="text-zinc-500 shrink-0 mt-0.5" />
+              <p className="text-zinc-300 italic">{task.details.notes}</p>
+            </div>
+          )}
+          {task.details?.issues && task.details.issues.length > 0 && (
+            <div className="flex gap-2">
+              <Hash size={14} className="text-zinc-500 shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-1">
+                {task.details.issues.map((issue, idx) => (
+                  <span key={idx} className="text-indigo-400 hover:text-indigo-300 underline cursor-pointer">{issue}</span>
+                ))}
+              </div>
+            </div>
+          )}
+          {task.details?.snippet && (
+            <div className="flex flex-col gap-2 mt-1">
+              <div className="flex items-center gap-2 text-zinc-500">
+                <Code size={14} />
+                <span className="text-[10px] uppercase font-bold tracking-wider">Relevant Context</span>
+              </div>
+              <div className="bg-zinc-950 p-2 rounded border border-zinc-800 font-mono text-zinc-400 overflow-x-auto">
+                <pre>{task.details.snippet}</pre>
+              </div>
+            </div>
+          )}
+        </div>
       )}
 
       {childrenExpanded && hasChildren && (
@@ -111,10 +112,6 @@ const TaskItem: React.FC<{ task: Task }> = ({ task }) => {
   );
 };
 
-interface PlanViewProps {
-  planContent?: string;
-  onViewSource?: () => void;
-}
 
 // Convert ParsedTask to Task format for display
 function convertToTask(parsedTask: ParsedTask, depth: number = 0): Task {
@@ -134,7 +131,8 @@ function convertToTask(parsedTask: ParsedTask, depth: number = 0): Task {
   };
 }
 
-const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
+const PlanView: React.FC = () => {
+  const { planContent } = useMakerStore();
   const [parsedPlan, setParsedPlan] = useState<ParsedPlan | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,61 +167,61 @@ const PlanView: React.FC<PlanViewProps> = ({ planContent, onViewSource }) => {
 
   return (
     <div className="h-full flex flex-col p-4 lg:p-6">
-       <div className="mb-4 lg:mb-6 flex justify-between items-end">
-           <div>
-               <h2 className="text-xl font-bold text-white">
-                 {parsedPlan ? parsedPlan.title : 'Execution Plan'}
-               </h2>
-               <p className="text-zinc-400 text-sm mt-1">
-                 {parsedPlan
-                   ? `${parsedPlan.task_count} tasks • ${parsedPlan.dependencies.length} dependencies`
-                   : 'No plan loaded'
-                 }
-               </p>
-           </div>
-           <div className="flex gap-2">
-             {loading && (
-               <RefreshCw size={14} className="animate-spin text-indigo-400" />
-             )}
-             {planContent && (
-               <button
-                 onClick={() => { setShowSource(!showSource); onViewSource?.(); }}
-                 className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors"
-               >
-                   <FileText size={14} />
-                   <span className="hidden sm:inline">{showSource ? 'Hide Source' : 'View Source'}</span>
-               </button>
-             )}
-           </div>
-       </div>
+      <div className="mb-4 lg:mb-6 flex justify-between items-end">
+        <div>
+          <h2 className="text-xl font-bold text-white">
+            {parsedPlan ? parsedPlan.title : 'Execution Plan'}
+          </h2>
+          <p className="text-zinc-400 text-sm mt-1">
+            {parsedPlan
+              ? `${parsedPlan.task_count} tasks • ${parsedPlan.dependencies.length} dependencies`
+              : 'No plan loaded'
+            }
+          </p>
+        </div>
+        <div className="flex gap-2">
+          {loading && (
+            <RefreshCw size={14} className="animate-spin text-indigo-400" />
+          )}
+          {planContent && (
+            <button
+              onClick={() => { setShowSource(!showSource); }}
+              className="flex items-center gap-2 text-xs bg-zinc-800 hover:bg-zinc-700 text-zinc-300 px-3 py-1.5 rounded border border-zinc-700 transition-colors"
+            >
+              <FileText size={14} />
+              <span className="hidden sm:inline">{showSource ? 'Hide Source' : 'View Source'}</span>
+            </button>
+          )}
+        </div>
+      </div>
 
-       {error && (
-         <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-sm">
-           {error}
-         </div>
-       )}
+      {error && (
+        <div className="mb-4 p-3 bg-red-900/20 border border-red-500/30 rounded text-red-400 text-sm">
+          {error}
+        </div>
+      )}
 
-       {showSource && planContent && (
-         <div className="mb-4 bg-black rounded border border-zinc-800 p-4 max-h-48 overflow-y-auto">
-           <pre className="text-xs text-zinc-400 font-mono whitespace-pre-wrap">{planContent}</pre>
-         </div>
-       )}
+      {showSource && planContent && (
+        <div className="mb-4 bg-black rounded border border-zinc-800 p-4 max-h-48 overflow-y-auto">
+          <pre className="text-xs text-zinc-400 font-mono whitespace-pre-wrap">{planContent}</pre>
+        </div>
+      )}
 
-       <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg overflow-y-auto p-2 scrollbar-thin">
-           {hasPlan ? (
-             displayTasks.map(task => (
-               <TaskItem key={task.id} task={task} />
-             ))
-           ) : (
-             <div className="flex flex-col items-center justify-center h-full text-zinc-500 py-12">
-               <ListTodo size={48} className="mb-4 opacity-30" />
-               <p className="text-sm font-medium">No execution plan loaded</p>
-               <p className="text-xs mt-1 text-zinc-600">
-                 Complete the PRD interrogation to generate a plan
-               </p>
-             </div>
-           )}
-       </div>
+      <div className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg overflow-y-auto p-2 scrollbar-thin">
+        {hasPlan ? (
+          displayTasks.map(task => (
+            <TaskItem key={task.id} task={task} />
+          ))
+        ) : (
+          <div className="flex flex-col items-center justify-center h-full text-zinc-500 py-12">
+            <ListTodo size={48} className="mb-4 opacity-30" />
+            <p className="text-sm font-medium">No execution plan loaded</p>
+            <p className="text-xs mt-1 text-zinc-600">
+              Complete the PRD interrogation to generate a plan
+            </p>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

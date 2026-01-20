@@ -20,13 +20,15 @@ import {
   MultiFileEdit,
   MultiFileValidationResult,
   EditImpactPreview
-} from '../hooks/useTauri';
+} from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface ValidationPanelProps {
-  workspacePath: string;
+  className?: string; // Optional if needed
 }
 
-export const ValidationPanel: React.FC<ValidationPanelProps> = ({ workspacePath }) => {
+export const ValidationPanel: React.FC<ValidationPanelProps> = () => {
+  const { workspacePath } = useMakerStore();
   const [edits, setEdits] = useState<MultiFileEdit[]>([
     { file_path: '', operation: 'modify', content: '' }
   ]);
@@ -123,11 +125,10 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({ workspacePath 
                 <button
                   key={op}
                   onClick={() => updateEdit(index, 'operation', op)}
-                  className={`px-2 py-1 text-xs rounded ${
-                    edit.operation === op
-                      ? 'bg-indigo-600 text-white'
-                      : 'bg-zinc-800 text-zinc-400 hover:text-white'
-                  }`}
+                  className={`px-2 py-1 text-xs rounded ${edit.operation === op
+                    ? 'bg-indigo-600 text-white'
+                    : 'bg-zinc-800 text-zinc-400 hover:text-white'
+                    }`}
                 >
                   {op}
                 </button>
@@ -205,11 +206,10 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({ workspacePath 
 
       {/* Validation Result */}
       {validationResult && (
-        <div className={`p-4 rounded-lg border ${
-          validationResult.is_safe
-            ? 'bg-green-500/10 border-green-500/30'
-            : 'bg-red-500/10 border-red-500/30'
-        }`}>
+        <div className={`p-4 rounded-lg border ${validationResult.is_safe
+          ? 'bg-green-500/10 border-green-500/30'
+          : 'bg-red-500/10 border-red-500/30'
+          }`}>
           <div className="flex items-center gap-2 mb-3">
             {validationResult.is_safe ? (
               <>
@@ -294,7 +294,7 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({ workspacePath 
       {/* Error Display */}
       {error && (
         <div className="mt-4 p-3 bg-red-500/10 border border-red-500/30 rounded-lg flex items-start gap-2">
-          <AlertTriangle size={16} className="text-red-400 mt-0.5 flex-shrink-0" />
+          <AlertTriangle size={16} className="text-red-400 mt-0.5 shrink-0" />
           <span className="text-red-300 text-sm">{error}</span>
         </div>
       )}
@@ -302,3 +302,4 @@ export const ValidationPanel: React.FC<ValidationPanelProps> = ({ workspacePath 
   );
 };
 
+export default ValidationPanel;

@@ -2,46 +2,36 @@ import { useState, useEffect, useCallback } from 'react';
 import { Save, FolderOpen, Trash2, Clock, FileText, MessageSquare, Database, Loader2, Plus, RefreshCw, CheckCircle, AlertCircle, Zap } from 'lucide-react';
 import {
   SessionSummary,
-  SessionData,
   saveSession,
   loadSession,
   listSessions,
   deleteSession,
-} from '../hooks/useTauri';
+} from '../tauri-api';
+import { useMakerStore } from '../store/makerStore';
 
 interface SessionPanelProps {
-  workspacePath: string;
-  prdContent: string | null;
-  prdFilename: string | null;
-  conversationHistory: unknown[];
-  planContent: string | null;
-  currentView: string;
-  currentSessionId: string | null;
-  autoSaveEnabled: boolean;
-  autoSaveStatus: 'idle' | 'saving' | 'saved' | 'error';
-  lastAutoSave: Date | null;
-  onLoadSession: (session: SessionData) => void;
-  onSessionCreated: (sessionId: string) => void;
-  onAutoSaveToggle: (enabled: boolean) => void;
   className?: string;
 }
 
-const SessionPanel: React.FC<SessionPanelProps> = ({
-  workspacePath,
-  prdContent,
-  prdFilename,
-  conversationHistory,
-  planContent,
-  currentView,
-  currentSessionId,
-  autoSaveEnabled,
-  autoSaveStatus,
-  lastAutoSave,
-  onLoadSession,
-  onSessionCreated,
-  onAutoSaveToggle,
-  className = '',
-}) => {
+const SessionPanel: React.FC<SessionPanelProps> = ({ className = '' }) => {
+  const {
+    workspacePath,
+    prdFile,
+    chatMessages,
+    planContent,
+    currentView,
+    currentSessionId,
+    autoSaveEnabled,
+    autoSaveStatus,
+    lastAutoSave,
+    setCurrentSessionId,
+    setAutoSaveEnabled,
+    setPrdFile,
+    setChatMessages,
+    setPlanContent,
+    setCurrentView,
+    setWorkspacePath,
+  } = useMakerStore();
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
@@ -79,15 +69,15 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     try {
       const session = await saveSession(
         sessionName.trim(),
-        workspacePath,
-        prdContent,
-        prdFilename,
-        conversationHistory,
+        workspacePath || '',
+        prdFile?.content || null,
+        prdFile?.name || null,
+        chatMessages,
         planContent,
         currentView
       );
       // Notify parent to enable auto-save for this session
-      onSessionCreated(session.id);
+      setCurrentSessionId(session.id);
       setSuccess('Session saved! Auto-save enabled.');
       setSessionName('');
       setShowNewSession(false);
@@ -105,7 +95,13 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
     setError(null);
     try {
       const session = await loadSession(sessionId);
-      onLoadSession(session);
+      // Simplified: Just update store values directly
+      setWorkspacePath(session.workspace_path || '');
+      setPrdFile({ content: session.prd_content || '', name: 'prd.md', type: 'md' });
+      setChatMessages(session.conversation_history as any);
+      setPlanContent(session.plan_content);
+      setCurrentView(session.current_view as any);
+      setCurrentSessionId(session.id);
       setSuccess('Session loaded successfully!');
       setTimeout(() => setSuccess(null), 3000);
     } catch (e) {
@@ -188,15 +184,13 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
             <span className="text-sm text-zinc-400">Auto-save</span>
           </div>
           <button
-            onClick={() => onAutoSaveToggle(!autoSaveEnabled)}
-            className={`relative w-10 h-5 rounded-full transition-colors ${
-              autoSaveEnabled ? 'bg-indigo-600' : 'bg-zinc-700'
-            }`}
+            onClick={() => setAutoSaveEnabled(!autoSaveEnabled)}
+            className={`relative w-10 h-5 rounded-full transition-colors ${autoSaveEnabled ? 'bg-indigo-600' : 'bg-zinc-700'
+              }`}
           >
             <div
-              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${
-                autoSaveEnabled ? 'left-5' : 'left-0.5'
-              }`}
+              className={`absolute top-0.5 w-4 h-4 rounded-full bg-white transition-transform ${autoSaveEnabled ? 'left-5' : 'left-0.5'
+                }`}
             />
           </button>
         </div>
@@ -270,10 +264,10 @@ const SessionPanel: React.FC<SessionPanelProps> = ({
           </div>
           <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-500">
             <span className="flex items-center gap-1">
-              <FileText size={12} /> PRD: {prdContent ? 'Yes' : 'No'}
+              <FileText size={12} /> PRD: {prdFile?.content ? 'Yes' : 'No'}
             </span>
             <span className="flex items-center gap-1">
-              <MessageSquare size={12} /> Messages: {conversationHistory.length}
+              <MessageSquare size={12} /> Messages: {chatMessages.length}
             </span>
             <span className="flex items-center gap-1">
               <Database size={12} /> Plan: {planContent ? 'Yes' : 'No'}

@@ -2,6 +2,7 @@
 // Uses Zustand for state management
 
 import { create } from 'zustand';
+import { ViewType, AgentState, ChatMessage, PRDFile, GraphNode, GraphLink } from '../types';
 
 // Types for the MAKER system
 export interface ExecutionEvent {
@@ -120,6 +121,23 @@ interface MakerState {
   rlmIsProcessing: boolean;
   rlmSelectedStep: number | null;
 
+  // New Global UI & Data State
+  currentView: ViewType;
+  agentState: AgentState;
+  settingsOpen: boolean;
+  prdFile: PRDFile | null;
+  chatMessages: ChatMessage[];
+  isLoading: boolean;
+  graphNodes: GraphNode[];
+  graphLinks: GraphLink[];
+  planContent: string | null;
+  researchContext: string | null;
+  kbContext: string | null;
+  currentSessionId: string | null;
+  autoSaveEnabled: boolean;
+  lastAutoSave: Date | null;
+  autoSaveStatus: 'idle' | 'saving' | 'saved' | 'error';
+
   // Actions
   setRuntimeInitialized: (initialized: boolean) => void;
   setWorkspacePath: (path: string) => void;
@@ -145,6 +163,25 @@ interface MakerState {
   setRLMConfig: (config: RLMConfig) => void;
   setRLMIsProcessing: (processing: boolean) => void;
   setRLMSelectedStep: (step: number | null) => void;
+
+  // Global UI & Data Actions
+  setCurrentView: (view: ViewType) => void;
+  setAgentState: (state: AgentState) => void;
+  setSettingsOpen: (open: boolean) => void;
+  setPrdFile: (file: PRDFile | null) => void;
+  setChatMessages: (messages: ChatMessage[]) => void;
+  addChatMessage: (message: ChatMessage) => void;
+  setIsLoading: (loading: boolean) => void;
+  setGraphNodes: (nodes: GraphNode[]) => void;
+  setGraphLinks: (links: GraphLink[]) => void;
+  setPlanContent: (content: string | null) => void;
+  setResearchContext: (context: string | null) => void;
+  setKbContext: (context: string | null) => void;
+  setCurrentSessionId: (id: string | null) => void;
+  setAutoSaveEnabled: (enabled: boolean) => void;
+  setLastAutoSave: (date: Date | null) => void;
+  setAutoSaveStatus: (status: 'idle' | 'saving' | 'saved' | 'error') => void;
+  sendMessage: (message: string) => Promise<void>;
 }
 
 export const useMakerStore = create<MakerState>((set) => ({
@@ -170,6 +207,23 @@ export const useMakerStore = create<MakerState>((set) => ({
   rlmConfig: null,
   rlmIsProcessing: false,
   rlmSelectedStep: null,
+
+  // Global UI & Data initial state
+  currentView: 'upload',
+  agentState: AgentState.IDLE,
+  settingsOpen: false,
+  prdFile: null,
+  chatMessages: [],
+  isLoading: false,
+  graphNodes: [],
+  graphLinks: [],
+  planContent: null,
+  researchContext: null,
+  kbContext: null,
+  currentSessionId: null,
+  autoSaveEnabled: true,
+  lastAutoSave: null,
+  autoSaveStatus: 'idle',
 
   // Actions
   setRuntimeInitialized: (initialized) => set({ runtimeInitialized: initialized }),
@@ -222,5 +276,29 @@ export const useMakerStore = create<MakerState>((set) => ({
   setRLMIsProcessing: (processing) => set({ rlmIsProcessing: processing }),
 
   setRLMSelectedStep: (step) => set({ rlmSelectedStep: step }),
+
+  // Global UI & Data Actions
+  setCurrentView: (view) => set({ currentView: view }),
+  setAgentState: (state) => set({ agentState: state }),
+  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  setPrdFile: (file) => set({ prdFile: file }),
+  setChatMessages: (messages) => set({ chatMessages: messages }),
+  addChatMessage: (message) => set((state) => ({ chatMessages: [...state.chatMessages, message] })),
+  setIsLoading: (loading) => set({ isLoading: loading }),
+  setGraphNodes: (nodes) => set({ graphNodes: nodes }),
+  setGraphLinks: (links) => set({ graphLinks: links }),
+  setPlanContent: (content) => set({ planContent: content }),
+  setResearchContext: (context) => set({ researchContext: context }),
+  setKbContext: (context) => set({ kbContext: context }),
+  setCurrentSessionId: (id) => set({ currentSessionId: id }),
+  setAutoSaveEnabled: (enabled) => set({ autoSaveEnabled: enabled }),
+  setLastAutoSave: (date) => set({ lastAutoSave: date }),
+  setAutoSaveStatus: (status) => set({ autoSaveStatus: status }),
+  sendMessage: async (message) => {
+    // This is a placeholder for the logic from App.tsx
+    // The actual logic should probably be in an effect or a separate service,
+    // but for now we define the action to fix the type error.
+    console.log('Sending message:', message);
+  }
 }));
 

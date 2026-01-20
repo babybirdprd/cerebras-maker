@@ -1,12 +1,10 @@
 import React from 'react';
 import { LayoutDashboard, Network, History, Settings, Terminal, ShieldCheck, Home, MessageSquare, Shield, FileCheck, FolderOpen, Loader2, CheckCircle, AlertCircle, Zap, MessagesSquare } from 'lucide-react';
 
+// Zustand store
+import { useMakerStore } from '../store/makerStore';
+
 interface SidebarProps {
-  currentView: string;
-  onChangeView: (view: string) => void;
-  onOpenSettings: () => void;
-  autoSaveStatus?: 'idle' | 'saving' | 'saved' | 'error';
-  currentSessionId?: string | null;
   className?: string;
 }
 
@@ -23,12 +21,20 @@ const navItems = [
   { id: 'history', label: 'Shadow Git', icon: History },
 ];
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onOpenSettings, autoSaveStatus = 'idle', currentSessionId = null, className = '' }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ className = '' }) => {
+  const {
+    currentView, setCurrentView,
+    setSettingsOpen,
+    autoSaveStatus, currentSessionId
+  } = useMakerStore();
+
+  const onChangeView = (view: string) => setCurrentView(view as any);
+  const onOpenSettings = () => setSettingsOpen(true);
   return (
     <div className={`w-64 h-full bg-zinc-950 border-r border-zinc-800 flex flex-col justify-between ${className}`}>
       <div>
         <div className="p-6 flex items-center gap-3">
-          <div className="w-8 h-8 bg-gradient-to-br from-indigo-500 to-purple-600 rounded flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
+          <div className="w-8 h-8 bg-linear-to-br from-indigo-500 to-purple-600 rounded flex items-center justify-center font-bold text-white shadow-lg shadow-indigo-500/20">
             C
           </div>
           <div>
@@ -42,11 +48,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onO
             <button
               key={item.id}
               onClick={() => onChangeView(item.id)}
-              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-all ${
-                currentView === item.id
-                  ? 'bg-zinc-800 text-white font-medium border border-zinc-700'
-                  : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
-              }`}
+              className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-sm transition-all ${currentView === item.id
+                ? 'bg-zinc-800 text-white font-medium border border-zinc-700'
+                : 'text-zinc-400 hover:text-white hover:bg-zinc-900'
+                }`}
             >
               <item.icon size={18} />
               {item.label}
@@ -95,17 +100,17 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onO
         )}
 
         <div className="bg-zinc-900 rounded-lg p-3 border border-zinc-800 mb-2">
-            <div className="flex items-center justify-between mb-2">
-                <span className="text-xs text-zinc-400 font-mono uppercase">Reliability</span>
-                <ShieldCheck size={14} className="text-emerald-500" />
-            </div>
-            <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
-                <div className="bg-emerald-500 w-[99.9%] h-full"></div>
-            </div>
-            <div className="flex justify-between mt-1">
-                <span className="text-[10px] text-zinc-500">Grits Core</span>
-                <span className="text-[10px] text-emerald-400 font-mono">100% Solid</span>
-            </div>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs text-zinc-400 font-mono uppercase">Reliability</span>
+            <ShieldCheck size={14} className="text-emerald-500" />
+          </div>
+          <div className="w-full bg-zinc-800 h-1.5 rounded-full overflow-hidden">
+            <div className="bg-emerald-500 w-[99.9%] h-full"></div>
+          </div>
+          <div className="flex justify-between mt-1">
+            <span className="text-[10px] text-zinc-500">Grits Core</span>
+            <span className="text-[10px] text-emerald-400 font-mono">100% Solid</span>
+          </div>
         </div>
         <button
           onClick={onOpenSettings}
@@ -119,29 +124,31 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentView, onChangeView, onO
   );
 };
 
-export const MobileNav: React.FC<SidebarProps> = ({ currentView, onChangeView, onOpenSettings, className = '' }) => {
+export const MobileNav: React.FC<SidebarProps> = ({ className = '' }) => {
+  const { currentView, setCurrentView, setSettingsOpen } = useMakerStore();
+  const onChangeView = (view: string) => setCurrentView(view as any);
+  const onOpenSettings = () => setSettingsOpen(true);
   return (
     <div className={`h-16 bg-zinc-950 border-t border-zinc-800 flex items-center justify-around px-2 ${className}`}>
       {navItems.map((item) => (
         <button
           key={item.id}
           onClick={() => onChangeView(item.id)}
-          className={`flex flex-col items-center justify-center p-2 rounded-md transition-all ${
-            currentView === item.id
-              ? 'text-indigo-400'
-              : 'text-zinc-500 hover:text-zinc-300'
-          }`}
+          className={`flex flex-col items-center justify-center p-2 rounded-md transition-all ${currentView === item.id
+            ? 'text-indigo-400'
+            : 'text-zinc-500 hover:text-zinc-300'
+            }`}
         >
           <item.icon size={20} />
           <span className="text-[10px] mt-1 font-medium">{item.label}</span>
         </button>
       ))}
-      <button 
+      <button
         onClick={onOpenSettings}
         className="flex flex-col items-center justify-center p-2 text-zinc-500 hover:text-zinc-300"
       >
-          <Settings size={20} />
-          <span className="text-[10px] mt-1 font-medium">Config</span>
+        <Settings size={20} />
+        <span className="text-[10px] mt-1 font-medium">Config</span>
       </button>
     </div>
   );
